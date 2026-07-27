@@ -4,16 +4,26 @@
 #include <vector>
 #include <string>
 
-
 class Neural_Matrix {
     private:
         int rows, cols;
         std::vector<float> data;
+        float* device_data; // Ekran kartındaki (VRAM) verinin adresi
 
         friend class Neural_Network;
 
     public:
         Neural_Matrix(int r, int c);
+        ~Neural_Matrix();
+
+        // CUDA Bellek kopyalamaları için (Çift Serbest Bırakmayı Önler)
+        Neural_Matrix(const Neural_Matrix& other);
+        Neural_Matrix& operator=(const Neural_Matrix& other);
+
+        void allocate_device_memory();
+        void copy_to_device();
+        void copy_to_host();
+
         void randomize();
         void print() const;
         void apply_relu();
@@ -24,13 +34,9 @@ class Neural_Matrix {
         void subtract(const Neural_Matrix& other);
         void add(const Neural_Matrix& other);
 
-
         Neural_Matrix transpose() const;
         Neural_Matrix multiply(const Neural_Matrix& other) const;
-
-
 };
-
 
 class Neural_Network {
 private:

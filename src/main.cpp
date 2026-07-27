@@ -92,7 +92,7 @@ int main() {
     read_mnist("data/train-images.idx3-ubyte", "data/train-labels.idx1-ubyte", inputs, targets);
     std::cout << inputs.size() << " Adet Resim Basariyla Yuklendi!\n" << std::endl;
 
-    std::vector<int> topology = {784, 512, 128, 10};
+    std::vector<int> topology = {784, 128, 10};
     Neural_Network nn(topology);
 
 

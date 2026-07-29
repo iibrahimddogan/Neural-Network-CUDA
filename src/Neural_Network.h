@@ -8,7 +8,7 @@ class Neural_Matrix {
     private:
         int rows, cols;
         std::vector<float> data;
-        float* device_data; // Ekran kartındaki (VRAM) verinin adresi
+        float* device_data; 
 
         friend class Neural_Network;
 
@@ -16,7 +16,7 @@ class Neural_Matrix {
         Neural_Matrix(int r, int c);
         ~Neural_Matrix();
 
-        // CUDA Bellek kopyalamaları için (Çift Serbest Bırakmayı Önler)
+        
         Neural_Matrix(const Neural_Matrix& other);
         Neural_Matrix& operator=(const Neural_Matrix& other);
 
@@ -34,12 +34,13 @@ class Neural_Matrix {
         void subtract(const Neural_Matrix& other);
         void add(const Neural_Matrix& other);
 
-        Neural_Matrix transpose() const;
-        Neural_Matrix multiply(const Neural_Matrix& other) const;
+        void transpose(Neural_Matrix& result) const;
+        void multiply(const Neural_Matrix& other, Neural_Matrix& result) const;
 };
 
 class Neural_Network {
 private:
+    int batch_size;
     std::vector<int> topology;
     std::vector<Neural_Matrix> weights;
     std::vector<Neural_Matrix> biases;
@@ -47,8 +48,13 @@ private:
     std::vector<Neural_Matrix> layer_outputs;
     std::vector<Neural_Matrix> layer_activations;
 
+    std::vector<Neural_Matrix> errors;             
+    std::vector<Neural_Matrix> weights_T;          
+    std::vector<Neural_Matrix> activations_T;      
+    std::vector<Neural_Matrix> weight_deltas;
+
 public:
-    Neural_Network(std::vector<int> topology);
+    Neural_Network(std::vector<int> topology, int batch_size);
     std::vector<float> forward(const std::vector<float>& input);
 
     float calculate_mse(const std::vector<float>& predicted, const std::vector<float>& target);

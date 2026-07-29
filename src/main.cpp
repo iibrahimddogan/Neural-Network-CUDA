@@ -84,6 +84,8 @@ void read_mnist(const std::string& image_path, const std::string& label_path,
 }
 
 
+// ... (Yukarıdaki okuma fonksiyonları read_mnist vb. tamamen aynı kalacak)
+
 int main() {
     std::cout << "MNIST Veri Seti Okunuyor (Tam 60.000 Resim)..." << std::endl;
     std::vector<std::vector<float>> inputs;
@@ -92,137 +94,72 @@ int main() {
     read_mnist("data/train-images.idx3-ubyte", "data/train-labels.idx1-ubyte", inputs, targets);
     std::cout << inputs.size() << " Adet Resim Basariyla Yuklendi!\n" << std::endl;
 
-    std::vector<int> topology = {784, 128, 10};
-    Neural_Network nn(topology);
+    // --- YENİ BATCH MANTIKLI AĞ KURULUMU ---
+    int batch_size = 128;
+    std::vector<int> topology = { 784, 128, 10 };
 
+    // Ağımızı artık batch_size parametresiyle başlatıyoruz
+    Neural_Network nn(topology, batch_size);
 
     int epochs = 10;
-    float learning_rate = 0.001f;
+    // Batch (Toplu) kullandığımız için 128 resmin ortalamasını alıyoruz. 
+    // Bu yüzden öğrenme oranını (learning rate) biraz artırabiliriz.
+    float learning_rate = 0.05f;
 
-    std::cout << "60.000 Resimlik Egitim Basliyor! (Release modunda hizli surecektir)\n" << std::endl;
+    std::cout << "60.000 Resimlik Egitim Basliyor! (Mini-Batch: 128)\n" << std::endl;
 
     for (int epoch = 0; epoch < epochs; ++epoch) {
         float toplam_hata = 0.0f;
+        int batch_sayisi = 0;
 
-        for (size_t i = 0; i < inputs.size(); ++i) {
+        // İleriye doğru 1'er 1'er değil, 128'er 128'er (batch_size) atlayarak gidiyoruz
+        for (size_t i = 0; i < inputs.size(); i += batch_size) {
 
-            std::vector<float> tahmin = nn.forward(inputs[i]);
+            // 60.000 resim 128'e tam bölünmez (Sonda 96 resim artar). 
+            // Boyut uyuşmazlığı ve program çökmesi olmasın diye o son eksik paketi atlıyoruz (PyTorch'ta da kural böyledir)
+            if (i + batch_size > inputs.size()) break;
 
-            for (size_t j = 0; j < 10; ++j) {
-                float fark = targets[i][j] - tahmin[j];
-                toplam_hata += fark * fark;
+            // GPU'daki matris çarpım kuralına (Row-Major) uymak için pikselleri gruplayarak paketliyoruz
+            std::vector<float> batch_inputs(784 * batch_size);
+            for (int p = 0; p < 784; ++p) {
+                for (int b = 0; b < batch_size; ++b) {
+                    batch_inputs[p * batch_size + b] = inputs[i + b][p];
+                }
             }
 
-            nn.backpropagate(targets[i], learning_rate);
+            // Aynı kuralı hedefler (targets) için de yapıyoruz
+            std::vector<float> batch_targets(10 * batch_size);
+            for (int t = 0; t < 10; ++t) {
+                for (int b = 0; b < batch_size; ++b) {
+                    batch_targets[t * batch_size + b] = targets[i + b][t];
+                }
+            }
+
+            // 128 RESMİ TEK HAMLEDE AĞA GÖNDER!
+            std::vector<float> tahmin = nn.forward(batch_inputs);
+
+            // Sadece bilgi amaçlı ekrana yazdırmak için ortalama hatayı hesaplıyoruz
+            for (int t = 0; t < 10; ++t) {
+                for (int b = 0; b < batch_size; ++b) {
+                    float fark = batch_targets[t * batch_size + b] - tahmin[t * batch_size + b];
+                    toplam_hata += fark * fark;
+                }
+            }
+
+            // 128 RESMİN HATASINI TEK HAMLEDE GERİYE YAY!
+            nn.backpropagate(batch_targets, learning_rate);
+            batch_sayisi++;
         }
 
+        // Hata oranını hesaplarken toplam resim sayısına (işlenen) bölüyoruz
+        int islenen_resim = batch_sayisi * batch_size;
         std::cout << "Tur (Epoch): " << epoch + 1 << "/" << epochs
-                  << " | Ortalama Hata (Loss): " << toplam_hata / inputs.size() << std::endl;
+            << " | Ortalama Hata (Loss): " << (toplam_hata / (float)islenen_resim) << std::endl;
     }
 
-    // --- EĞİTİLMİŞ BEYNİ KAYDET ---
     std::cout << "\nMuazzam egitim bitti! Yeni agirliklar kaydediliyor..." << std::endl;
-    nn.save_model("mnist_model(784_512_128_10).bin");
-    std::cout << "KAYIT BASARILI! Eski beynin yerini 60.000 resimlik yeni zeka aldi.\n" << std::endl;
+    nn.save_model("mnist_model_batch128.bin");
+    std::cout << "KAYIT BASARILI! Gercek GPU gucuyle egitilen model hazir.\n" << std::endl;
 
     return 0;
 }
-
-/* genel test
-int main() {
-    std::cout << "MNIST Veri Seti Okunuyor..." << std::endl;
-    std::vector<std::vector<float>> inputs;
-    std::vector<std::vector<float>> targets;
-
-    read_mnist("data/train-images.idx3-ubyte", "data/train-labels.idx1-ubyte", inputs, targets);
-
-    std::vector<int> topology = {784, 128, 10};
-    Neural_Network nn(topology);
-
-    // --- EĞİTİLMİŞ BEYNİ YÜKLE ---
-    std::cout << "60.000 resimle egitilmis beyin (mnist_model.bin) yukleniyor..." << std::endl;
-    try {
-        nn.load_model("mnist_model.bin");
-        std::cout << "Beyin basariyla canlandirildi!\n" << std::endl;
-    } catch (const std::exception& e) {
-        std::cout << "Hata: " << e.what() << std::endl;
-        return 1;
-    }
-
-    // --- BÜYÜK SINAV (DOĞRULUK TESTİ) ---
-    int test_edilecek_resim_sayisi = 10000; // İlk 10.000 resmi soralım
-    int dogru_bilinen = 0;
-
-    std::cout << test_edilecek_resim_sayisi << " adet resim uzerinde sinav basliyor...\n" << std::endl;
-
-    for (int i = 0; i < test_edilecek_resim_sayisi; ++i) {
-        std::vector<float> tahmin = nn.forward(inputs[i]);
-
-        // Yapay zekanın en yüksek puan verdiği rakamı bul (Örn: 0.95 ile 7 dedi)
-        int ai_tahmini = 0;
-        float en_yuksek_skor = tahmin[0];
-        for (int j = 1; j < 10; ++j) {
-            if (tahmin[j] > en_yuksek_skor) {
-                en_yuksek_skor = tahmin[j];
-                ai_tahmini = j;
-            }
-        }
-
-        // Gerçek cevabı bul (Hangi index 1.0 ise cevap odur)
-        int gercek_cevap = 0;
-        for (int j = 0; j < 10; ++j) {
-            if (targets[i][j] == 1.0f) {
-                gercek_cevap = j;
-                break;
-            }
-        }
-
-        // Tahmin doğruysa skoru artır
-        if (ai_tahmini == gercek_cevap) {
-            dogru_bilinen++;
-        }
-    }
-
-    // Sonuçları Hesapla ve Yazdır
-    float basari_yuzdesi = ((float)dogru_bilinen / test_edilecek_resim_sayisi) * 100.0f;
-    std::cout << "--- SINAV SONUCU ---" << std::endl;
-    std::cout << "Toplam Soru: " << test_edilecek_resim_sayisi << std::endl;
-    std::cout << "Dogru Cevap: " << dogru_bilinen << std::endl;
-    std::cout << "Yanlis Cevap: " << (test_edilecek_resim_sayisi - dogru_bilinen) << std::endl;
-    std::cout << "Genel Basari Orani (Accuracy): %" << basari_yuzdesi << std::endl;
-
-    return 0;
-}
-*/
-// int main() {
-//     // 1. Ağın iskeletini kur
-//     std::vector<int> topology = {784, 128, 10};
-//     Neural_Network nn(topology);
-
-//     // 2. Eğittiğimiz beyni yükle
-//     std::cout << "Zeki beyin (mnist_model.bin) uyanmis durumda..." << std::endl;
-//     nn.load_model("data/mnist_model.bin");
-
-//     // 3. Kendi çizdiğin resmi yükle
-//     std::vector<float> benim_resmim = load_custom_bmp("data/5test.bmp");
-
-//     // 4. Tahmin ettir
-//     std::vector<float> tahmin = nn.forward(benim_resmim);
-
-//     // 5. En yüksek oranlı sonucu bul
-//     int ai_karari = 0;
-//     float en_yuksek_skor = tahmin[0];
-//     for(int i = 1; i < 10; i++) {
-//         if(tahmin[i] > en_yuksek_skor) {
-//             en_yuksek_skor = tahmin[i];
-//             ai_karari = i;
-//         }
-//     }
-
-//     std::cout << "-----------------------------------" << std::endl;
-//     std::cout << "Yapay Zeka: GORDUGUM BU RAKAM KESINLIKLE -> " << ai_karari << std::endl;
-//     std::cout << "Eminlik Orani: %" << (en_yuksek_skor * 100.0f) << std::endl;
-//     std::cout << "-----------------------------------" << std::endl;
-
-//     return 0;
-// }

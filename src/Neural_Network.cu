@@ -11,6 +11,25 @@
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
+__global__ void add_bias_broadcast_kernel(float* output, const float* bias, int rows, int cols) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row < rows && col < cols) {
+        output[row * cols + col] += bias[row];
+    }
+}
+
+__global__ void sum_bias_gradients_kernel(const float* gradients, float* bias_deltas, int rows, int cols) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {
+        float sum = 0.0f;
+        for (int col = 0; col < cols; col++) {
+            sum += gradients[row * cols + col];
+        }
+        bias_deltas[row] = sum;
+    }
+}
 
 __global__ void forward_kernel(float* weights, float* input, float* bias, float* output, int rows, int cols){
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -201,7 +220,7 @@ void Neural_Matrix::apply_relu(){
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
 
     relu_kernel<<<blocksPerGrid, threadsPerBlock>>>(device_data, size);
-    cudaDeviceSynchronize();
+    
 }
 
 void Neural_Matrix::relu_derivative(const Neural_Matrix& matrix){
@@ -211,7 +230,7 @@ void Neural_Matrix::relu_derivative(const Neural_Matrix& matrix){
 
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
     relu_derivative_kernel<<<blocksPerGrid, threadsPerBlock>>>(device_data, matrix.device_data, size);
-    cudaDeviceSynchronize();
+    
 }
 
 void Neural_Matrix::apply_sigmoid(){
@@ -221,7 +240,7 @@ void Neural_Matrix::apply_sigmoid(){
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
 
     sigmoid_kernel<<<blocksPerGrid, threadsPerBlock>>>(device_data, size);
-    cudaDeviceSynchronize();
+    
 }
 
 void Neural_Matrix::sigmoid_derivative(const Neural_Matrix& pre_activations) {
@@ -230,7 +249,7 @@ void Neural_Matrix::sigmoid_derivative(const Neural_Matrix& pre_activations) {
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
 
     sigmoid_derivative_kernel<<<blocksPerGrid, threadsPerBlock>>>(device_data, pre_activations.device_data, size);
-    cudaDeviceSynchronize();
+    
 }
 
 void Neural_Matrix::multiply_scalar(float scalar){
@@ -239,7 +258,7 @@ void Neural_Matrix::multiply_scalar(float scalar){
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
 
     multiply_scalar_kernel<<<blocksPerGrid, threadsPerBlock>>>(device_data, scalar, size);
-    cudaDeviceSynchronize();
+    
 }
 
 void Neural_Matrix::subtract(const Neural_Matrix& other){
@@ -248,7 +267,7 @@ void Neural_Matrix::subtract(const Neural_Matrix& other){
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
 
     subtract_kernel<<<blocksPerGrid, threadsPerBlock>>>(device_data, other.device_data, size);
-    cudaDeviceSynchronize();
+    
 }
 
 void Neural_Matrix::add(const Neural_Matrix& other){
@@ -257,100 +276,126 @@ void Neural_Matrix::add(const Neural_Matrix& other){
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
 
     add_kernel<<<blocksPerGrid, threadsPerBlock>>>(device_data, other.device_data, size);
-    cudaDeviceSynchronize();
+    
 }
 
-Neural_Matrix Neural_Matrix::transpose() const{
-    Neural_Matrix result(this->cols, this->rows);
-    result.allocate_device_memory();
+void Neural_Matrix::transpose(Neural_Matrix& result) const{
 
     int size = rows * cols;
     int threadsPerBlock = 256;
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
 
     transpose_kernel<<<blocksPerGrid, threadsPerBlock>>>(this->device_data, result.device_data, this->rows, this->cols);
-    cudaDeviceSynchronize();
-    return result;
+    
 }
 
-Neural_Matrix Neural_Matrix::multiply(const Neural_Matrix& other) const{
+void Neural_Matrix::multiply(const Neural_Matrix& other, Neural_Matrix& result) const{
     if (this->cols != other.rows) { throw std::runtime_error("Matrix dimensions are incompatible."); }
-
-    Neural_Matrix result(this->rows, other.cols);
-    result.allocate_device_memory();
 
     dim3 threadsPerBlock(16, 16);
     dim3 blocksPerGrid((other.cols + threadsPerBlock.x - 1) / threadsPerBlock.x,
                        (this->rows + threadsPerBlock.y - 1) / threadsPerBlock.y);
 
     matmul_kernel<<<blocksPerGrid, threadsPerBlock>>>(this->device_data, other.device_data, result.device_data, this->rows, this->cols, other.cols);
-    cudaDeviceSynchronize();
-    return result;
+    
 }
 
-
-Neural_Network::Neural_Network(std::vector<int> topology) {
+Neural_Network::Neural_Network(std::vector<int> topology, int batch_size) {
     this->topology = topology;
+    this->batch_size = batch_size;
+    
+    size_t num_layers = topology.size();
+    weights.reserve(num_layers - 1);
+    biases.reserve(num_layers - 1);
 
-    for (size_t i = 0; i < topology.size() - 1; ++i) {
+    layer_outputs.reserve(num_layers - 1);
+    layer_activations.reserve(num_layers);
 
+    errors.reserve(num_layers - 1);
+    weights_T.reserve(num_layers - 1);
+    activations_T.reserve(num_layers);
+    weight_deltas.reserve(num_layers - 1);
+
+    
+    Neural_Matrix input_activation(topology[0], batch_size);
+    input_activation.allocate_device_memory();
+    layer_activations.push_back(input_activation);
+
+    Neural_Matrix input_activation_T(batch_size, topology[0]);
+    input_activation_T.allocate_device_memory();
+    activations_T.push_back(input_activation_T);
+
+    for (size_t i = 0; i < num_layers - 1; ++i) {
+
+        
         Neural_Matrix weight_matrix(topology[i + 1], topology[i]);
         weight_matrix.randomize();
-
         weight_matrix.allocate_device_memory();
         weight_matrix.copy_to_device();
         weights.push_back(weight_matrix);
 
         Neural_Matrix bias_matrix(topology[i + 1], 1);
         bias_matrix.randomize();
-
         bias_matrix.allocate_device_memory();
         bias_matrix.copy_to_device();
         biases.push_back(bias_matrix);
+
+        
+        Neural_Matrix output(topology[i + 1], batch_size);
+        output.allocate_device_memory();
+        layer_outputs.push_back(output);
+
+        Neural_Matrix activation(topology[i + 1], batch_size);
+        activation.allocate_device_memory();
+        layer_activations.push_back(activation);
+
+        
+        Neural_Matrix error_mat(topology[i + 1], batch_size);
+        error_mat.allocate_device_memory();
+        errors.push_back(error_mat);
+
+        Neural_Matrix w_T(topology[i], topology[i + 1]);
+        w_T.allocate_device_memory();
+        weights_T.push_back(w_T);
+
+        Neural_Matrix a_T(batch_size, topology[i + 1]);
+        a_T.allocate_device_memory();
+        activations_T.push_back(a_T);
+
+        Neural_Matrix w_delta(topology[i + 1], topology[i]);
+        w_delta.allocate_device_memory();
+        weight_deltas.push_back(w_delta);
     }
 }
 
 std::vector<float> Neural_Network::forward(const std::vector<float>& input) {
-    layer_activations.clear();
-    layer_outputs.clear();
-
-    Neural_Matrix current_layer(input.size(), 1);
-    current_layer.data = input;
-    current_layer.allocate_device_memory();
-    current_layer.copy_to_device();
-
-    layer_activations.push_back(current_layer);
+    layer_activations[0].data = input;
+    layer_activations[0].copy_to_device();
 
     for (size_t i = 0; i < weights.size(); i++) {
-        Neural_Matrix next_layer(weights[i].rows, 1);
-        next_layer.allocate_device_memory();
 
-        int threadsPerBlock = 256;
-        int blocksPerGrid = (weights[i].rows + threadsPerBlock - 1) / threadsPerBlock;
+        weights[i].multiply(layer_activations[i], layer_outputs[i]);
 
-        forward_kernel<<<blocksPerGrid, threadsPerBlock>>>(
-            weights[i].device_data,
-            current_layer.device_data,
-            biases[i].device_data,
-            next_layer.device_data,
-            weights[i].rows,
-            weights[i].cols
-        );
-        cudaDeviceSynchronize();
+        
+        dim3 threadsPerBlock(16, 16);
+        dim3 blocksPerGrid((batch_size + 15) / 16, (weights[i].rows + 15) / 16);
+        add_bias_broadcast_kernel << <blocksPerGrid, threadsPerBlock >> > (
+            layer_outputs[i].device_data, biases[i].device_data, weights[i].rows, batch_size
+            );
 
-        current_layer = next_layer;
-        layer_outputs.push_back(current_layer);
+        
+        cudaMemcpy(layer_activations[i + 1].device_data, layer_outputs[i].device_data,
+            weights[i].rows * batch_size * sizeof(float), cudaMemcpyDeviceToDevice);
 
         if (i < weights.size() - 1) {
-            current_layer.apply_relu();
-        } else {
-            current_layer.apply_sigmoid();
+            layer_activations[i + 1].apply_relu();
         }
-        layer_activations.push_back(current_layer);
+        else {
+            layer_activations[i + 1].apply_sigmoid();
+        }
     }
-
-    current_layer.copy_to_host();
-    return current_layer.data;
+    layer_activations.back().copy_to_host();
+    return layer_activations.back().data;
 }
 
 float Neural_Network::calculate_mse(const std::vector<float>& predicted, const std::vector<float>& target){
@@ -366,42 +411,50 @@ float Neural_Network::calculate_mse(const std::vector<float>& predicted, const s
 }
 
 void Neural_Network::backpropagate(const std::vector<float>& target, float learning_rate) {
-    Neural_Matrix error(target.size(), 1);
+    size_t last_idx = weights.size() - 1;
 
+    
     layer_activations.back().copy_to_host();
-
     for (size_t i = 0; i < target.size(); i++) {
         float tahmin = layer_activations.back().data[i];
-        error.data[i] = 2.0f * (tahmin - target[i]);
+        errors[last_idx].data[i] = 2.0f * (tahmin - target[i]);
     }
-    error.allocate_device_memory();
-    error.copy_to_device();
+    errors[last_idx].copy_to_device();
 
-    for (int i = weights.size() - 1; i >= 0; i--) {
-        Neural_Matrix gradients = error;
+    
+    float batch_learning_rate = learning_rate / (float)batch_size;
 
-        if (i < weights.size() - 1) {
+    for (int i = last_idx; i >= 0; i--) {
+        Neural_Matrix& gradients = errors[i];
+        if (i < (int)last_idx) {
             gradients.relu_derivative(layer_outputs[i]);
-        } else {
+        }
+        else {
             gradients.sigmoid_derivative(layer_outputs[i]);
         }
 
-        Neural_Matrix prev_activation_T = layer_activations[i].transpose();
-        Neural_Matrix weight_deltas = gradients.multiply(prev_activation_T);
-
-        Neural_Matrix bias_deltas = gradients;
-        bias_deltas.multiply_scalar(learning_rate);
-        biases[i].subtract(bias_deltas);
-
-        weight_deltas.multiply_scalar(learning_rate);
-        Neural_Matrix old_weights = weights[i];
-
-        weights[i].subtract(weight_deltas);
+        layer_activations[i].transpose(activations_T[i]);
+        gradients.multiply(activations_T[i], weight_deltas[i]);
 
         if (i > 0) {
-            Neural_Matrix weights_T = old_weights.transpose();
-            error = weights_T.multiply(error);
+            weights[i].transpose(weights_T[i]);
+            weights_T[i].multiply(errors[i], errors[i - 1]);
         }
+
+        
+        Neural_Matrix bias_deltas(biases[i].rows, 1);
+        bias_deltas.allocate_device_memory();
+        int threads = 256;
+        int blocks = (biases[i].rows + threads - 1) / threads;
+        sum_bias_gradients_kernel << <blocks, threads >> > (
+            gradients.device_data, bias_deltas.device_data, biases[i].rows, batch_size
+            );
+
+        bias_deltas.multiply_scalar(batch_learning_rate);
+        biases[i].subtract(bias_deltas);
+
+        weight_deltas[i].multiply_scalar(batch_learning_rate);
+        weights[i].subtract(weight_deltas[i]);
     }
 }
 

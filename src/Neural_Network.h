@@ -4,61 +4,118 @@
 #include <vector>
 #include <string>
 
+
 class Neural_Matrix {
-    private:
-        int rows, cols;
-        std::vector<float> data;
-        float* device_data; 
+private:
+    int rows, cols;
+    std::vector<float> data;
+    float* device_data;
 
-        friend class Neural_Network;
+    friend class LinearLayer;
+    friend class Neural_Network;
 
-    public:
-        Neural_Matrix(int r, int c);
-        ~Neural_Matrix();
+public:
+    Neural_Matrix(int r, int c);
+    ~Neural_Matrix();
 
-        
-        Neural_Matrix(const Neural_Matrix& other);
-        Neural_Matrix& operator=(const Neural_Matrix& other);
+    Neural_Matrix(const Neural_Matrix& other);
+    Neural_Matrix& operator=(const Neural_Matrix& other);
 
-        void allocate_device_memory();
-        void copy_to_device();
-        void copy_to_host();
+    void allocate_device_memory();
+    void copy_to_device();
+    void copy_to_host();
 
-        void randomize();
-        void print() const;
-        void apply_relu();
-        void relu_derivative(const Neural_Matrix& matrix);
-        void apply_sigmoid();
-        void sigmoid_derivative(const Neural_Matrix& pre_activations);
-        void multiply_scalar(float scalar);
-        void subtract(const Neural_Matrix& other);
-        void add(const Neural_Matrix& other);
+    void randomize();
+    void print() const;
+    void apply_relu();
+    void relu_derivative(const Neural_Matrix& matrix);
+    void apply_sigmoid();
+    void sigmoid_derivative(const Neural_Matrix& pre_activations);
+    void multiply_scalar(float scalar);
+    void subtract(const Neural_Matrix& other);
+    void add(const Neural_Matrix& other);
 
-        void transpose(Neural_Matrix& result) const;
-        void multiply(const Neural_Matrix& other, Neural_Matrix& result) const;
+    void transpose(Neural_Matrix& result) const;
+    void multiply(const Neural_Matrix& other, Neural_Matrix& result) const;
 };
+
+
+class ILayer {
+public:
+    virtual ~ILayer() = default;
+    virtual std::vector<float> forward(const std::vector<float>& input, int batch_size) = 0;
+    virtual std::vector<float> backward(const std::vector<float>& gradient, float learning_rate, int batch_size) = 0;
+};
+
+
+class Conv2DLayer : public ILayer {
+private:
+    int input_size;
+    int filter_size;
+    int output_size;
+    std::vector<float> cnn_filter;
+    std::vector<float> last_input;
+public:
+    Conv2DLayer(int input_size, int filter_size);
+    std::vector<float> forward(const std::vector<float>& input, int batch_size) override;
+    std::vector<float> backward(const std::vector<float>& gradient, float learning_rate, int batch_size) override;
+
+    const std::vector<float>& get_filter() const { return cnn_filter; }
+    void set_filter(const std::vector<float>& f) { cnn_filter = f; }
+};
+
+
+class MaxPoolLayer : public ILayer {
+private:
+    int input_size;
+    int pool_size;
+    int output_size;
+    std::vector<float> last_input;
+public:
+    MaxPoolLayer(int input_size, int pool_size);
+    std::vector<float> forward(const std::vector<float>& input, int batch_size) override;
+    std::vector<float> backward(const std::vector<float>& gradient, float learning_rate, int batch_size) override;
+};
+
+
+class LinearLayer : public ILayer {
+private:
+    Neural_Matrix weights;
+    Neural_Matrix biases;
+    Neural_Matrix weight_deltas;
+    Neural_Matrix weights_T;
+    Neural_Matrix output;
+    Neural_Matrix activation;
+    Neural_Matrix error_mat;
+    Neural_Matrix activations_T;
+    std::string activation_type; // relu or sigmoid
+
+    std::vector<float> last_input;
+public:
+    LinearLayer(int in_features, int out_features, const std::string& act_type);
+    std::vector<float> forward(const std::vector<float>& input, int batch_size) override;
+    std::vector<float> backward(const std::vector<float>& gradient, float learning_rate, int batch_size) override;
+
+    Neural_Matrix& get_weights() { return weights; }
+    Neural_Matrix& get_biases() { return biases; }
+};
+
 
 class Neural_Network {
 private:
     int batch_size;
-    std::vector<int> topology;
-    std::vector<Neural_Matrix> weights;
-    std::vector<Neural_Matrix> biases;
-
-    std::vector<Neural_Matrix> layer_outputs;
-    std::vector<Neural_Matrix> layer_activations;
-
-    std::vector<Neural_Matrix> errors;             
-    std::vector<Neural_Matrix> weights_T;          
-    std::vector<Neural_Matrix> activations_T;      
-    std::vector<Neural_Matrix> weight_deltas;
+    std::vector<ILayer*> layers;
 
 public:
-    Neural_Network(std::vector<int> topology, int batch_size);
+    Neural_Network(int batch_size);
+    ~Neural_Network();
+
+    void add_layer(ILayer* layer);
+
     std::vector<float> forward(const std::vector<float>& input);
+    void backward(const std::vector<float>& target, float learning_rate);
 
     float calculate_mse(const std::vector<float>& predicted, const std::vector<float>& target);
-    void backpropagate(const std::vector<float>& target, float learning_rate);
 
     void save_model(const std::string& filename) const;
     void load_model(const std::string& filename);

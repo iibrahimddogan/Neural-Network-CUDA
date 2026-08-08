@@ -65,6 +65,9 @@ void read_mnist(const std::string& image_path, const std::string& label_path,
     // ÖNEMLİ: Artık 1000 değil, dosyadaki gerçek resim sayısı (60.000) kadar okuyoruz!
     int resim_sayisi = number_of_images;
 
+    images.reserve(resim_sayisi);
+    labels.reserve(resim_sayisi);
+
     for (int i = 0; i < resim_sayisi; ++i) {
         std::vector<float> image(n_rows * n_cols);
         for (int p = 0; p < n_rows * n_cols; ++p) {
@@ -72,14 +75,14 @@ void read_mnist(const std::string& image_path, const std::string& label_path,
             file_images.read((char*)&temp, sizeof(temp));
             image[p] = (float)temp / 255.0f;
         }
-        images.push_back(image);
+        images.push_back(std::move(image));
 
         unsigned char etiket = 0;
         file_labels.read((char*)&etiket, sizeof(etiket));
 
         std::vector<float> label(10, 0.0f);
         label[(int)etiket] = 1.0f;
-        labels.push_back(label);
+        labels.push_back(std::move(label));
     }
 }
 
@@ -260,6 +263,11 @@ int main() {
 
     int epochs = 10;
     float learning_rate = 0.05f;
+    const int input_dim = 784;
+    const int output_dim = 10;
+
+    std::vector<float> batch_inputs(input_dim * batch_size);
+    std::vector<float> batch_targets(output_dim * batch_size);
 
     std::cout << "\nYeni OOP Mimariyle Tam Ogrenen CNN Egitimi Basliyor! (Mini-Batch: 128)\n" << std::endl;
 
@@ -271,16 +279,13 @@ int main() {
             if (i + batch_size > inputs.size()) break;
 
             // Verileri paketle (Transpoze işlemleri artık içeride hallediliyor)
-            std::vector<float> batch_inputs(784 * batch_size);
-            std::vector<float> batch_targets(10 * batch_size);
-
             for (int b = 0; b < batch_size; ++b) {
-                for (int p = 0; p < 784; ++p) {
-                    batch_inputs[b * 784 + p] = inputs[i + b][p];
+                for (int p = 0; p < input_dim; ++p) {
+                    batch_inputs[b * input_dim + p] = inputs[i + b][p];
                 }
             }
 
-            for (int t = 0; t < 10; ++t) {
+            for (int t = 0; t < output_dim; ++t) {
                 for (int b = 0; b < batch_size; ++b) {
                     batch_targets[t * batch_size + b] = targets[i + b][t];
                 }

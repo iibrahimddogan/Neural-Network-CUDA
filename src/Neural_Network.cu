@@ -292,12 +292,12 @@ std::vector<float> Conv2DLayer::forward(const std::vector<float>& input, int bat
     int conv_output_size = this->output_size;
     float* d_input, * d_filter, * d_conv_output;
 
-    cudaMalloc(&d_input, input.size() * sizeof(float));
-    cudaMalloc(&d_filter, filter_size * filter_size * sizeof(float));
-    cudaMalloc(&d_conv_output, batch_size * conv_output_size * conv_output_size * sizeof(float));
+    CUDA_CHECK(cudaMalloc(&d_input, input.size() * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_filter, filter_size * filter_size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_conv_output, batch_size * conv_output_size * conv_output_size * sizeof(float)));
 
-    cudaMemcpy(d_input, input.data(), input.size() * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_filter, cnn_filter.data(), filter_size * filter_size * sizeof(float), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(d_input, input.data(), input.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_filter, cnn_filter.data(), filter_size * filter_size * sizeof(float), cudaMemcpyHostToDevice));
 
     dim3 threadsPerBlock(16, 16, 1);
     dim3 blocksPerGrid(
@@ -307,14 +307,16 @@ std::vector<float> Conv2DLayer::forward(const std::vector<float>& input, int bat
     );
 
     convolution_kernel << <blocksPerGrid, threadsPerBlock >> > (d_input, d_filter, d_conv_output, input_size, filter_size, conv_output_size, batch_size);
-    cudaDeviceSynchronize();
+    CUDA_CHECK(cudaGetLastError());
+
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<float> output(batch_size * conv_output_size * conv_output_size);
-    cudaMemcpy(output.data(), d_conv_output, output.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(output.data(), d_conv_output, output.size() * sizeof(float), cudaMemcpyDeviceToHost));
 
-    cudaFree(d_input);
-    cudaFree(d_filter);
-    cudaFree(d_conv_output);
+    CUDA_CHECK(cudaFree(d_input));
+    CUDA_CHECK(cudaFree(d_filter));
+    CUDA_CHECK(cudaFree(d_conv_output));
 
     return output;
 }
@@ -322,12 +324,12 @@ std::vector<float> Conv2DLayer::forward(const std::vector<float>& input, int bat
 std::vector<float> Conv2DLayer::backward(const std::vector<float>& gradient, float learning_rate, int batch_size) {
     float* d_input, * d_conv_gradients, * d_filter_gradients;
 
-    cudaMalloc(&d_input, last_input.size() * sizeof(float));
-    cudaMalloc(&d_conv_gradients, gradient.size() * sizeof(float));
-    cudaMalloc(&d_filter_gradients, filter_size * filter_size * sizeof(float));
+    CUDA_CHECK(cudaMalloc(&d_input, last_input.size() * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_conv_gradients, gradient.size() * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_filter_gradients, filter_size * filter_size * sizeof(float)));
 
-    cudaMemcpy(d_input, last_input.data(), last_input.size() * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_conv_gradients, gradient.data(), gradient.size() * sizeof(float), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(d_input, last_input.data(), last_input.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_conv_gradients, gradient.data(), gradient.size() * sizeof(float), cudaMemcpyHostToDevice));
 
     dim3 threadsPerBlock(filter_size, filter_size, 1);
     dim3 blocksPerGrid(1, 1, 1);
@@ -336,14 +338,15 @@ std::vector<float> Conv2DLayer::backward(const std::vector<float>& gradient, flo
         d_input, d_conv_gradients, d_filter_gradients,
         input_size, filter_size, output_size, batch_size
         );
-    cudaDeviceSynchronize();
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<float> h_filter_gradients(filter_size * filter_size);
-    cudaMemcpy(h_filter_gradients.data(), d_filter_gradients, h_filter_gradients.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(h_filter_gradients.data(), d_filter_gradients, h_filter_gradients.size() * sizeof(float), cudaMemcpyDeviceToHost));
 
-    cudaFree(d_input);
-    cudaFree(d_conv_gradients);
-    cudaFree(d_filter_gradients);
+    CUDA_CHECK(cudaFree(d_input));
+    CUDA_CHECK(cudaFree(d_conv_gradients));
+    CUDA_CHECK(cudaFree(d_filter_gradients));
 
     for (int i = 0; i < filter_size * filter_size; i++) {
         cnn_filter[i] = cnn_filter[i] - (learning_rate * h_filter_gradients[i]);
@@ -364,10 +367,10 @@ std::vector<float> MaxPoolLayer::forward(const std::vector<float>& input, int ba
     float* d_input, * d_pool_output;
     int flattened_size = output_size * output_size;
 
-    cudaMalloc(&d_input, input.size() * sizeof(float));
-    cudaMalloc(&d_pool_output, batch_size * flattened_size * sizeof(float));
+    CUDA_CHECK(cudaMalloc(&d_input, input.size() * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_pool_output, batch_size * flattened_size * sizeof(float)));
 
-    cudaMemcpy(d_input, input.data(), input.size() * sizeof(float), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(d_input, input.data(), input.size() * sizeof(float), cudaMemcpyHostToDevice));
 
     dim3 threadsPerBlock(16, 16, 1);
     dim3 blocksPerGrid(
@@ -377,13 +380,15 @@ std::vector<float> MaxPoolLayer::forward(const std::vector<float>& input, int ba
     );
 
     max_pooling_kernel << <blocksPerGrid, threadsPerBlock >> > (d_input, d_pool_output, input_size, pool_size, output_size, batch_size);
-    cudaDeviceSynchronize();
+    CUDA_CHECK(cudaGetLastError());
+
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<float> pooled_images(batch_size * flattened_size);
-    cudaMemcpy(pooled_images.data(), d_pool_output, pooled_images.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(pooled_images.data(), d_pool_output, pooled_images.size() * sizeof(float), cudaMemcpyDeviceToHost));
 
-    cudaFree(d_input);
-    cudaFree(d_pool_output);
+    CUDA_CHECK(cudaFree(d_input));
+    CUDA_CHECK(cudaFree(d_pool_output));
 
     std::vector<float> mlp_inputs(batch_size * flattened_size);
     for (int p = 0; p < flattened_size; ++p) {
@@ -404,12 +409,12 @@ std::vector<float> MaxPoolLayer::backward(const std::vector<float>& gradient, fl
     }
 
     float* d_input, * d_pool_gradients, * d_conv_gradients;
-    cudaMalloc(&d_input, last_input.size() * sizeof(float));
-    cudaMalloc(&d_pool_gradients, pool_gradients.size() * sizeof(float));
-    cudaMalloc(&d_conv_gradients, batch_size * input_size * input_size * sizeof(float));
+    CUDA_CHECK(cudaMalloc(&d_input, last_input.size() * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_pool_gradients, pool_gradients.size() * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_conv_gradients, batch_size * input_size * input_size * sizeof(float)));
 
-    cudaMemcpy(d_input, last_input.data(), last_input.size() * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_pool_gradients, pool_gradients.data(), pool_gradients.size() * sizeof(float), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(d_input, last_input.data(), last_input.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_pool_gradients, pool_gradients.data(), pool_gradients.size() * sizeof(float), cudaMemcpyHostToDevice));
 
     dim3 threadsPerBlock(16, 16, 1);
     dim3 blocksPerGrid(
@@ -422,25 +427,35 @@ std::vector<float> MaxPoolLayer::backward(const std::vector<float>& gradient, fl
         d_input, d_pool_gradients, d_conv_gradients,
         input_size, pool_size, output_size, batch_size
         );
-    cudaDeviceSynchronize();
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<float> conv_gradients(batch_size * input_size * input_size);
-    cudaMemcpy(conv_gradients.data(), d_conv_gradients, conv_gradients.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(conv_gradients.data(), d_conv_gradients, conv_gradients.size() * sizeof(float), cudaMemcpyDeviceToHost));
 
-    cudaFree(d_input);
-    cudaFree(d_pool_gradients);
-    cudaFree(d_conv_gradients);
+    CUDA_CHECK(cudaFree(d_input));
+    CUDA_CHECK(cudaFree(d_pool_gradients));
+    CUDA_CHECK(cudaFree(d_conv_gradients));
 
     return conv_gradients;
 }
 
 
 LinearLayer::LinearLayer(int in_features, int out_features, const std::string& act_type)
-    : weights(out_features, in_features), biases(out_features, 1),
-    weight_deltas(out_features, in_features), weights_T(in_features, out_features),
-    output(out_features, 1), activation(out_features, 1), error_mat(out_features, 1),
-    activations_T(1, out_features), activation_type(act_type) {
+    :
+    weights(out_features, in_features),
+    biases(out_features, 1),
 
+    weight_deltas(out_features, in_features),
+    weights_T(in_features, out_features),
+
+    output(out_features, 1),
+    activation(out_features,1),
+    error_mat(out_features,1),
+    activations_T(1, out_features),
+    activation_type(act_type)
+
+{
     weights.randomize();
     weights.allocate_device_memory();
     weights.copy_to_device();
@@ -477,12 +492,11 @@ std::vector<float> LinearLayer::forward(const std::vector<float>& input, int bat
 
     dim3 threadsPerBlock(16, 16);
     dim3 blocksPerGrid((batch_size + 15) / 16, (weights.rows + 15) / 16);
-    add_bias_broadcast_kernel << <blocksPerGrid, threadsPerBlock >> > (
-        output.device_data, biases.device_data, weights.rows, batch_size
-        );
-    cudaDeviceSynchronize();
+    add_bias_broadcast_kernel<<<blocksPerGrid, threadsPerBlock >>>(output.device_data, biases.device_data, weights.rows, batch_size);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
 
-    cudaMemcpy(activation.device_data, output.device_data, weights.rows * batch_size * sizeof(float), cudaMemcpyDeviceToDevice);
+    CUDA_CHECK(cudaMemcpy(activation.device_data, output.device_data, weights.rows * batch_size * sizeof(float), cudaMemcpyDeviceToDevice));
 
     if (activation_type == "relu") {
         activation.apply_relu();
@@ -534,7 +548,8 @@ std::vector<float> LinearLayer::backward(const std::vector<float>& gradient, flo
     sum_bias_gradients_kernel << <blocks, threads >> > (
         error_mat.device_data, bias_deltas.device_data, biases.rows, batch_size
         );
-    cudaDeviceSynchronize();
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     float batch_lr = learning_rate / (float)batch_size;
 
@@ -653,7 +668,9 @@ void max_pooling_backward(float* d_input_images, float* d_pool_gradients, float*
         input_size, pool_size, output_size, batch_size
         );
 
-    cudaDeviceSynchronize();
+    CUDA_CHECK(cudaGetLastError());
+    
+    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 /// <summary>
@@ -677,7 +694,9 @@ void calculate_filter_gradients(float* d_input_images, float* d_conv_gradients, 
         input_size, filter_size, conv_output_size, batch_size
         );
 
-    cudaDeviceSynchronize();
+    CUDA_CHECK(cudaGetLastError());
+
+    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 /// <summary>
@@ -701,7 +720,9 @@ void max_pooling(float* d_input_images, float* d_output_images,
 
     max_pooling_kernel<<<blocksPerGrid, threadsPerBlock >>>(d_input_images, d_output_images, input_size, pool_size, output_size, batch_size);
 
-    cudaDeviceSynchronize();
+    CUDA_CHECK(cudaGetLastError());
+
+    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 /// <summary>
@@ -724,7 +745,9 @@ void convolution(float* input_images, float* filter, float* output_image, int in
     
     convolution_kernel<<<blocksPerGrid, threadsPerBlock>>>(input_images, filter, output_image, input_size, filter_size, output_size, batch_size);
 
-    cudaDeviceSynchronize();
+    CUDA_CHECK(cudaGetLastError());
+
+    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 /// <summary>
@@ -742,7 +765,7 @@ Neural_Matrix::Neural_Matrix(int r, int c){
 
 Neural_Matrix::~Neural_Matrix() {
     if (device_data != nullptr) {
-        cudaFree(device_data);
+        CUDA_CHECK(cudaFree(device_data));
     }
 }
 
@@ -758,7 +781,7 @@ Neural_Matrix::Neural_Matrix(const Neural_Matrix& other){
 
     if (other.device_data != nullptr) {
         allocate_device_memory();
-        cudaMemcpy(device_data, other.device_data, rows * cols * sizeof(float), cudaMemcpyDeviceToDevice);
+        CUDA_CHECK(cudaMemcpy(device_data, other.device_data, rows * cols * sizeof(float), cudaMemcpyDeviceToDevice));
     }
 }
 
@@ -770,12 +793,12 @@ Neural_Matrix& Neural_Matrix::operator=(const Neural_Matrix& other) {
     cols = other.cols;
     data = other.data;
 
-    if (device_data != nullptr) cudaFree(device_data);
+    if (device_data != nullptr) CUDA_CHECK(cudaFree(device_data));
     device_data = nullptr;
 
     if (other.device_data != nullptr) {
         allocate_device_memory();
-        cudaMemcpy(device_data, other.device_data, rows * cols * sizeof(float), cudaMemcpyDeviceToDevice);
+        CUDA_CHECK(cudaMemcpy(device_data, other.device_data, rows * cols * sizeof(float), cudaMemcpyDeviceToDevice));
     }
     return *this;
 }
@@ -783,20 +806,20 @@ Neural_Matrix& Neural_Matrix::operator=(const Neural_Matrix& other) {
 void Neural_Matrix::allocate_device_memory() {
 
     if (device_data == nullptr) {
-        cudaMalloc(&device_data, rows * cols * sizeof(float));
+        CUDA_CHECK(cudaMalloc(&device_data, rows * cols * sizeof(float)));
     }
 }
 
 void Neural_Matrix::copy_to_device() {
 
     if (device_data == nullptr) allocate_device_memory();
-    cudaMemcpy(device_data, data.data(), rows * cols * sizeof(float), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(device_data, data.data(), rows * cols * sizeof(float), cudaMemcpyHostToDevice));
 }
 
 void Neural_Matrix::copy_to_host() {
 
     if (device_data != nullptr) {
-        cudaMemcpy(data.data(), device_data, rows * cols * sizeof(float), cudaMemcpyDeviceToHost);
+        CUDA_CHECK(cudaMemcpy(data.data(), device_data, rows * cols * sizeof(float), cudaMemcpyDeviceToHost));
     }
 }
 
@@ -829,6 +852,8 @@ void Neural_Matrix::apply_relu(){
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
 
     relu_kernel<<<blocksPerGrid, threadsPerBlock>>>(device_data, size);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
     
 }
 
@@ -843,7 +868,8 @@ void Neural_Matrix::relu_derivative(const Neural_Matrix& matrix){
 
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
     relu_derivative_kernel<<<blocksPerGrid, threadsPerBlock>>>(device_data, matrix.device_data, size);
-    
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 void Neural_Matrix::apply_sigmoid(){
@@ -853,6 +879,8 @@ void Neural_Matrix::apply_sigmoid(){
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
 
     sigmoid_kernel<<<blocksPerGrid, threadsPerBlock>>>(device_data, size);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
     
 }
 
@@ -862,6 +890,8 @@ void Neural_Matrix::sigmoid_derivative(const Neural_Matrix& pre_activations) {
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
 
     sigmoid_derivative_kernel<<<blocksPerGrid, threadsPerBlock>>>(device_data, pre_activations.device_data, size);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
     
 }
 
@@ -875,6 +905,8 @@ void Neural_Matrix::multiply_scalar(float scalar){
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
 
     multiply_scalar_kernel<<<blocksPerGrid, threadsPerBlock>>>(device_data, scalar, size);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
     
 }
 
@@ -888,6 +920,8 @@ void Neural_Matrix::subtract(const Neural_Matrix& other){
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
 
     subtract_kernel<<<blocksPerGrid, threadsPerBlock>>>(device_data, other.device_data, size);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
     
 }
 
@@ -901,6 +935,8 @@ void Neural_Matrix::add(const Neural_Matrix& other){
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
 
     add_kernel<<<blocksPerGrid, threadsPerBlock>>>(device_data, other.device_data, size);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
     
 }
 
@@ -915,6 +951,8 @@ void Neural_Matrix::transpose(Neural_Matrix& result) const{
     int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
 
     transpose_kernel<<<blocksPerGrid, threadsPerBlock>>>(this->device_data, result.device_data, this->rows, this->cols);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
     
 }
 
@@ -931,6 +969,8 @@ void Neural_Matrix::multiply(const Neural_Matrix& other, Neural_Matrix& result) 
                        (this->rows + threadsPerBlock.y - 1) / threadsPerBlock.y);
 
     matmul_kernel<<<blocksPerGrid, threadsPerBlock>>>(this->device_data, other.device_data, result.device_data, this->rows, this->cols, other.cols);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
     
 }
 

@@ -3,6 +3,16 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#include <stdexcept>
+#include <cuda_runtime.h>
+
+#define CUDA_CHECK(call) \
+do { \
+    cudaError_t error = call; \
+    if(error != cudaSuccess){ \
+        throw std::runtime_error(std::string("CUDA error code: ") + cudaGetErrorString(error) + " -> File: " + std::string(__FILE__) + " line: " + std::to_string(__LINE__)); \
+    } \
+} while (0)
 
 
 class Neural_Matrix {

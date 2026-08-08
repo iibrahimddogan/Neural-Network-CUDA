@@ -63,6 +63,7 @@ private:
     int input_size;
     int filter_size;
     int output_size;
+    int num_of_filters;
     std::vector<float> cnn_filter;
     std::vector<float> last_input;
 
@@ -74,7 +75,7 @@ private:
     int current_batch_size;
 
 public:
-    Conv2DLayer(int input_size, int filter_size);
+    Conv2DLayer(int input_size, int filter_size, int num_of_filters);
     ~Conv2DLayer();
 
     std::vector<float> forward(const std::vector<float>& input, int batch_size) override;
@@ -90,6 +91,7 @@ private:
     int input_size;
     int pool_size;
     int output_size;
+    int channels;
     std::vector<float> last_input;
 
     float* d_input;
@@ -99,7 +101,7 @@ private:
     int current_batch_size;
 
 public:
-    MaxPoolLayer(int input_size, int pool_size);
+    MaxPoolLayer(int input_size, int pool_size,int channels);
     ~MaxPoolLayer();
     std::vector<float> forward(const std::vector<float>& input, int batch_size) override;
     std::vector<float> backward(const std::vector<float>& gradient, float learning_rate, int batch_size) override;

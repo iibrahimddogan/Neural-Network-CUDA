@@ -62,6 +62,76 @@ __global__ void max_pooling_backward_kernel(const float* input_images, const flo
     }
 }
 
+// Optimized kernel: parallel over classes using shared memory reductions.
+// One block per sample. Each thread handles a subset of classes.
+__global__ void softmax_cross_entropy_kernel_opt(const float* logits, const float* targets, float* grads, float* losses, int num_classes, int batch_size) {
+    int b = blockIdx.x; // sample index
+    if (b >= batch_size) return;
+
+    extern __shared__ float sdata[]; // reused for reductions
+
+    int tid = threadIdx.x;
+    int nthreads = blockDim.x;
+
+    // 1) per-thread local max
+    float local_max = -INFINITY;
+    for (int c = tid; c < num_classes; c += nthreads) {
+        float v = logits[c * batch_size + b];
+        if (v > local_max) local_max = v;
+    }
+    sdata[tid] = local_max;
+    __syncthreads();
+
+    // 2) reduce to get global max
+    for (int offset = nthreads >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            sdata[tid] = fmaxf(sdata[tid], sdata[tid + offset]);
+        }
+        __syncthreads();
+    }
+    float m = sdata[0];
+
+    // 3) compute partial sums of exp()
+    float local_sum = 0.0f;
+    for (int c = tid; c < num_classes; c += nthreads) {
+        float v = expf(logits[c * batch_size + b] - m);
+        local_sum += v;
+    }
+    sdata[tid] = local_sum;
+    __syncthreads();
+
+    // 4) reduce sums
+    for (int offset = nthreads >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            sdata[tid] += sdata[tid + offset];
+        }
+        __syncthreads();
+    }
+    float sum = sdata[0];
+
+    // 5) compute grads and per-sample loss (each thread handles subset)
+    float local_loss = 0.0f;
+    for (int c = tid; c < num_classes; c += nthreads) {
+        float prob = expf(logits[c * batch_size + b] - m) / sum;
+        grads[c * batch_size + b] = prob - targets[c * batch_size + b];
+        if (targets[c * batch_size + b] > 0.5f) {
+            local_loss = -logf(prob + 1e-12f);
+        }
+    }
+
+    // reduce losses (only one thread will have non-zero local_loss)
+    sdata[tid] = local_loss;
+    __syncthreads();
+    for (int offset = nthreads >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            sdata[tid] += sdata[tid + offset];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) losses[b] = sdata[0];
+}
+
 
 __global__ void convolution_filter_gradient_kernel(const float* input_images, const float* conv_gradients, float* filter_gradients, int input_size, int filter_size, int conv_output_size, int num_of_filters, int batch_size) {
 
@@ -659,10 +729,45 @@ std::vector<float> Neural_Network::forward(const std::vector<float>& input) {
 }
 
 void Neural_Network::backward(const std::vector<float>& target, float learning_rate) {
-    std::vector<float> current_gradient(target.size());
-    for (size_t i = 0; i < target.size(); ++i) {
-        current_gradient[i] = 2.0f * (s_last_prediction[i] - target[i]);
-    }
+
+    // Use CUDA kernel to compute softmax + cross-entropy gradients on device.
+    size_t total = target.size();
+    int batch = this->batch_size;
+    if (batch <= 0) batch = 1;
+    int num_classes = (int)(total / batch);
+
+    // Allocate device buffers
+    float* d_logits = nullptr;
+    float* d_targets = nullptr;
+    float* d_grads = nullptr;
+    float* d_losses = nullptr;
+
+    CUDA_CHECK(cudaMalloc(&d_logits, total * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_targets, total * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_grads, total * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_losses, batch * sizeof(float)));
+
+    // copy logits and targets to device
+    CUDA_CHECK(cudaMemcpy(d_logits, s_last_prediction.data(), total * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_targets, target.data(), total * sizeof(float), cudaMemcpyHostToDevice));
+
+    // launch optimized kernel: one block per sample, threads per block chosen to utilize warps
+    int threads_per_block = 32;
+    if (threads_per_block > num_classes) threads_per_block = 32; // keep at least 32 for warp efficiency
+    size_t shared_mem = threads_per_block * sizeof(float);
+    softmax_cross_entropy_kernel_opt<<<batch, threads_per_block, shared_mem>>>(d_logits, d_targets, d_grads, d_losses, num_classes, batch);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // copy grads back to host
+    std::vector<float> current_gradient(total);
+    CUDA_CHECK(cudaMemcpy(current_gradient.data(), d_grads, total * sizeof(float), cudaMemcpyDeviceToHost));
+
+    // free device temporaries
+    CUDA_CHECK(cudaFree(d_logits));
+    CUDA_CHECK(cudaFree(d_targets));
+    CUDA_CHECK(cudaFree(d_grads));
+    CUDA_CHECK(cudaFree(d_losses));
 
     for (int i = layers.size() - 1; i >= 0; --i) {
         current_gradient = layers[i]->backward(current_gradient, learning_rate, batch_size);

@@ -140,14 +140,27 @@ int main(int argc, char** argv) {
         int batch_size = 128;
         Neural_Network nn(batch_size);
 
-        // Model: Conv -> Pool -> MLP
-        nn.add_layer(new Conv2DLayer(28, 3, 16));
-        nn.add_layer(new MaxPoolLayer(26, 2, 16));
-        nn.add_layer(new LinearLayer(2704, 128, "relu"));
+        // Model: Conv -> Pool -> Flatten -> MLP
+// 1. BLOK: İlk Evrişim ve Havuzlama (Giriş: 28x28 Siyah-Beyaz Resim)
+        nn.add_layer(new Conv2DLayer(1, 28, 3, 16));  // 28x28 girer, 16 Kanal 26x26 çıkar
+        nn.add_layer(new MaxPoolLayer(26, 2, 16));    // 26x26 girer, 16 Kanal 13x13 çıkar
+
+        // 2. BLOK: İKİNCİ EVRİŞİM (Gerçek Derinlik Burası!)
+        // 16 kanallı 13x13 veriyi alıyoruz. 3x3 boyutunda 32 YENİ FİLTRE uyguluyoruz!
+        nn.add_layer(new Conv2DLayer(16, 13, 3, 32)); // 13x13 girer, 32 Kanal 11x11 çıkar
+        nn.add_layer(new MaxPoolLayer(11, 2, 32));    // 11x11 girer, 32 Kanal 5x5 çıkar
+
+        // 3. BLOK: Düzleştirme (Flatten)
+        // Artık elimizde 32 kanal var ve resimler 5x5 boyutuna kadar küçüldü.
+        nn.add_layer(new FlattenLayer(32, 5)); 
+
+        // 4. BLOK: Karar Ağı (MLP)
+        // 32 kanal * 5 * 5 = 800 nöronluk giriş (Eskiden 2704'tü, ağ şimdi daha hafif ve zeki!)
+        nn.add_layer(new LinearLayer(800, 128, "relu"));
         nn.add_layer(new LinearLayer(128, 64, "relu"));
         nn.add_layer(new LinearLayer(64, 10, "")); // linear logits
 
-        int epochs = 10;
+        int epochs = 20;
         float learning_rate = 0.05f;
         const int input_dim = 784;
         const int output_dim = 10;
@@ -211,11 +224,26 @@ int main(int argc, char** argv) {
         }
 
         Neural_Network nn(1);
-        nn.add_layer(new Conv2DLayer(28, 3, 16));
-        nn.add_layer(new MaxPoolLayer(26, 2, 16));
-        nn.add_layer(new LinearLayer(2704, 128, "relu"));
+
+        // Model: Conv -> Pool -> Flatten -> MLP
+// 1. BLOK: İlk Evrişim ve Havuzlama (Giriş: 28x28 Siyah-Beyaz Resim)
+        nn.add_layer(new Conv2DLayer(1, 28, 3, 16));  // 28x28 girer, 16 Kanal 26x26 çıkar
+        nn.add_layer(new MaxPoolLayer(26, 2, 16));    // 26x26 girer, 16 Kanal 13x13 çıkar
+
+        // 2. BLOK: İKİNCİ EVRİŞİM (Gerçek Derinlik Burası!)
+        // 16 kanallı 13x13 veriyi alıyoruz. 3x3 boyutunda 32 YENİ FİLTRE uyguluyoruz!
+        nn.add_layer(new Conv2DLayer(16, 13, 3, 32)); // 13x13 girer, 32 Kanal 11x11 çıkar
+        nn.add_layer(new MaxPoolLayer(11, 2, 32));    // 11x11 girer, 32 Kanal 5x5 çıkar
+
+        // 3. BLOK: Düzleştirme (Flatten)
+        // Artık elimizde 32 kanal var ve resimler 5x5 boyutuna kadar küçüldü.
+        nn.add_layer(new FlattenLayer(32, 5)); 
+
+        // 4. BLOK: Karar Ağı (MLP)
+        // 32 kanal * 5 * 5 = 800 nöronluk giriş (Eskiden 2704'tü, ağ şimdi daha hafif ve zeki!)
+        nn.add_layer(new LinearLayer(800, 128, "relu"));
         nn.add_layer(new LinearLayer(128, 64, "relu"));
-        nn.add_layer(new LinearLayer(64, 10, ""));
+        nn.add_layer(new LinearLayer(64, 10, "")); // linear logits
 
         std::cout << "Tam Ogrenen CNN zekasi (mnist_cnn_oop_model.bin) VRAM'e yukleniyor...\n" << std::endl;
         try {

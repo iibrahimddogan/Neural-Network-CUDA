@@ -62,8 +62,7 @@ __global__ void max_pooling_backward_kernel(const float* input_images, const flo
     }
 }
 
-// Optimized kernel: parallel over classes using shared memory reductions.
-// One block per sample. Each thread handles a subset of classes.
+
 __global__ void softmax_cross_entropy_kernel_opt(const float* logits, const float* targets, float* grads, float* losses, int num_classes, int batch_size) {
     int b = blockIdx.x; // sample index
     if (b >= batch_size) return;
@@ -133,35 +132,92 @@ __global__ void softmax_cross_entropy_kernel_opt(const float* logits, const floa
 }
 
 
-__global__ void convolution_filter_gradient_kernel(const float* input_images, const float* conv_gradients, float* filter_gradients, int input_size, int filter_size, int conv_output_size, int num_of_filters, int batch_size) {
+__global__ void convolution_kernel(const float* input_images, const float* filter, float* output_images, int input_size, int filter_size, int output_size, int in_channels, int num_of_filters, int batch_size) {
+    int col = threadIdx.x + blockDim.x * blockIdx.x;
+    int row = threadIdx.y + blockDim.y * blockIdx.y;
+    int z = threadIdx.z + blockDim.z * blockIdx.z;
 
+    if (row < output_size && col < output_size && z < (batch_size * num_of_filters)) {
+        int batch_idx = z / num_of_filters;
+        int filter_idx = z % num_of_filters;
+        float sum = 0.0f;
+        int output_offset = z * (output_size * output_size);
+
+        for (int c = 0; c < in_channels; c++) {
+            int input_offset = (batch_idx * in_channels + c) * (input_size * input_size);
+            int filter_offset = (filter_idx * in_channels + c) * (filter_size * filter_size);
+
+            for (int i = 0; i < filter_size; i++) {
+                for (int j = 0; j < filter_size; j++) {
+                    int image_row = row + i;
+                    int image_col = col + j;
+                    float pixel_value = input_images[input_offset + (image_row * input_size + image_col)];
+                    float filter_value = filter[filter_offset + (i * filter_size + j)];
+                    sum += pixel_value * filter_value;
+                }
+            }
+        }
+        if (sum < 0.0f) sum = 0.0f; // ReLU
+        output_images[output_offset + (row * output_size + col)] = sum;
+    }
+}
+
+__global__ void convolution_filter_gradient_kernel(const float* input_images, const float* conv_gradients, float* filter_gradients, int input_size, int filter_size, int conv_output_size, int in_channels, int num_of_filters, int batch_size) {
     int f_col = threadIdx.x + blockDim.x * blockIdx.x;
     int f_row = threadIdx.y + blockDim.y * blockIdx.y;
-    int filter_idx = threadIdx.z + blockDim.z * blockIdx.z; 
+    int z = threadIdx.z + blockDim.z * blockIdx.z; 
 
-    if (f_row < filter_size && f_col < filter_size && filter_idx < num_of_filters) {
+    if (f_row < filter_size && f_col < filter_size && z < (num_of_filters * in_channels)) {
+        int filter_idx = z / in_channels;
+        int c = z % in_channels;
         float grad_sum = 0.0f;
 
         for (int b = 0; b < batch_size; ++b) {
-            int in_batch_offset = b * (input_size * input_size);
-            
-            
-            int out_matrix_idx = (b * num_of_filters) + filter_idx;
-            int out_batch_offset = out_matrix_idx * (conv_output_size * conv_output_size);
+            int in_offset = (b * in_channels + c) * (input_size * input_size);
+            int out_offset = (b * num_of_filters + filter_idx) * (conv_output_size * conv_output_size);
 
             for (int r = 0; r < conv_output_size; ++r) {
-                for (int c = 0; c < conv_output_size; ++c) {
-                    float input_val = input_images[in_batch_offset + (r + f_row) * input_size + (c + f_col)];
-                    float grad_val = conv_gradients[out_batch_offset + (r * conv_output_size + c)];
-
+                for (int col = 0; col < conv_output_size; ++col) {
+                    float input_val = input_images[in_offset + (r + f_row) * input_size + (col + f_col)];
+                    float grad_val = conv_gradients[out_offset + (r * conv_output_size + col)];
                     grad_sum += input_val * grad_val;
                 }
             }
         }
-
-        
-        int filter_offset = filter_idx * (filter_size * filter_size);
+        int filter_offset = z * (filter_size * filter_size);
         filter_gradients[filter_offset + (f_row * filter_size + f_col)] = grad_sum / (float)batch_size;
+    }
+}
+
+__global__ void convolution_input_gradient_kernel(const float* conv_gradients, const float* filters, float* input_gradients, int input_size, int filter_size, int output_size, int in_channels, int num_of_filters, int batch_size) {
+    int in_col = threadIdx.x + blockDim.x * blockIdx.x;
+    int in_row = threadIdx.y + blockDim.y * blockIdx.y;
+    int z = threadIdx.z + blockDim.z * blockIdx.z; 
+
+    if (in_row < input_size && in_col < input_size && z < (batch_size * in_channels)) {
+        int batch_idx = z / in_channels;
+        int c = z % in_channels;
+        float grad_sum = 0.0f;
+
+        for (int f = 0; f < num_of_filters; ++f) {
+            int filter_offset = (f * in_channels + c) * (filter_size * filter_size);
+            int out_batch_offset = (batch_idx * num_of_filters + f) * (output_size * output_size);
+
+            for (int i = 0; i < filter_size; i++) {
+                for (int j = 0; j < filter_size; j++) {
+                    int out_row = in_row - i;
+                    int out_col = in_col - j;
+
+                    if (out_row >= 0 && out_row < output_size && out_col >= 0 && out_col < output_size) {
+                        float grad_val = conv_gradients[out_batch_offset + out_row * output_size + out_col];
+                        float filter_val = filters[filter_offset + i * filter_size + j];
+                        grad_sum += grad_val * filter_val;
+                    }
+                }
+            }
+        }
+        int input_offset = z * (input_size * input_size);
+        input_gradients[input_offset + in_row * input_size + in_col] = grad_sum;
     }
 }
 
@@ -279,44 +335,7 @@ __global__ void matmul_kernel(const float* A_matrix, const float* B_matrix, floa
     }
 }
 
-__global__ void convolution_kernel(const float* input_images, const float* filter, float* output_images, int input_size, int filter_size, int output_size,int num_of_filters, int batch_size) {
-    int col = threadIdx.x + blockDim.x * blockIdx.x;
-    int row = threadIdx.y + blockDim.y * blockIdx.y;
 
-    int z = threadIdx.z + blockDim.z * blockIdx.z;
-
-    if (row < output_size && col < output_size && z < (batch_size * num_of_filters))
-    {
-        int batch_idx = z / num_of_filters;
-        int filter_idx = z % num_of_filters;
-
-        float sum = 0.0f;
-
-        int input_offset = batch_idx * (input_size * input_size);
-        int filter_offset = filter_idx * (filter_size * filter_size);
-        int output_offset = z * (output_size * output_size);
-
-        for (int  i = 0; i < filter_size; i++)
-        {
-            for (int j = 0; j < filter_size; j++) {
-                int image_row = row + i;
-                int image_col = col + j;
-
-                float pixel_value = input_images[input_offset + (image_row * input_size + image_col)];
-                float filter_value = filter[filter_offset + (i * filter_size + j)];
-
-                sum += pixel_value * filter_value;
-            }
-        }
-
-        if (sum < 0.0f)
-        {
-            sum = 0.0f;
-        }
-
-        output_images[output_offset + (row * output_size + col)] = sum;
-    }
-}
 
 __global__ void max_pooling_kernel(const float* input_images, float* output_images, int input_size, int pool_size, int output_size, int batch_size) {
     int output_col = threadIdx.x + blockDim.x * blockIdx.x;
@@ -349,24 +368,27 @@ __global__ void max_pooling_kernel(const float* input_images, float* output_imag
     }
 }
 
-/// @brief Constructor for the Conv2DLayer
+
+/// @brief 
+/// @param in_channels 
 /// @param input_size 
 /// @param filter_size 
 /// @param num_of_filters 
-Conv2DLayer::Conv2DLayer(int input_size, int filter_size, int num_of_filters) {
+Conv2DLayer::Conv2DLayer(int in_channels, int input_size, int filter_size, int num_of_filters) {
+    this->in_channels = in_channels;
     this->input_size = input_size;
     this->filter_size = filter_size;
     this->output_size = input_size - filter_size + 1;
     this->num_of_filters = num_of_filters;
 
-    int total_filter_weights = num_of_filters * filter_size * filter_size;
+
+    int total_filter_weights = num_of_filters * in_channels * filter_size * filter_size;
     this->cnn_filter.resize(total_filter_weights);
 
     std::random_device random;
     std::mt19937 gen(random());
     std::uniform_real_distribution<float> dis(-0.1f, 0.1f);
-    for (int i = 0; i < total_filter_weights; i++)
-    {
+    for (int i = 0; i < total_filter_weights; i++) {
         this->cnn_filter[i] = dis(gen);
     }
 
@@ -385,11 +407,15 @@ Conv2DLayer::~Conv2DLayer() {
     if (d_conv_gradients) cudaFree(d_conv_gradients);
     if (d_filter_gradients) cudaFree(d_filter_gradients);
 }
+
+
+/// @brief 
+/// @param input 
+/// @param batch_size 
+/// @return 
 std::vector<float> Conv2DLayer::forward(const std::vector<float>& input, int batch_size) {
     this->last_input = input;
     int conv_output_size = this->output_size;
-    
-    
     int total_output_matrices = batch_size * num_of_filters;
 
     if (d_input == nullptr || current_batch_size != batch_size) {
@@ -399,11 +425,7 @@ std::vector<float> Conv2DLayer::forward(const std::vector<float>& input, int bat
             CUDA_CHECK(cudaFree(d_conv_output));
         }
         CUDA_CHECK(cudaMalloc(&d_input, input.size() * sizeof(float)));
-        
-        
         CUDA_CHECK(cudaMalloc(&d_filter, cnn_filter.size() * sizeof(float)));
-        
-        
         CUDA_CHECK(cudaMalloc(&d_conv_output, total_output_matrices * conv_output_size * conv_output_size * sizeof(float)));
         current_batch_size = batch_size;
     }
@@ -418,55 +440,73 @@ std::vector<float> Conv2DLayer::forward(const std::vector<float>& input, int bat
         (total_output_matrices + threadsPerBlock.z - 1) / threadsPerBlock.z 
     );
 
-    
-    convolution_kernel <<<blocksPerGrid, threadsPerBlock >>> (d_input, d_filter, d_conv_output, input_size, filter_size, conv_output_size, num_of_filters, batch_size);
+    convolution_kernel <<<blocksPerGrid, threadsPerBlock >>> (d_input, d_filter, d_conv_output, input_size, filter_size, conv_output_size, in_channels, num_of_filters, batch_size);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
-
     
     std::vector<float> output(total_output_matrices * conv_output_size * conv_output_size);
     CUDA_CHECK(cudaMemcpy(output.data(), d_conv_output, output.size() * sizeof(float), cudaMemcpyDeviceToHost));
-
     return output;
 }
 
+
+/// @brief 
+/// @param gradient 
+/// @param learning_rate 
+/// @param batch_size 
+/// @return 
 std::vector<float> Conv2DLayer::backward(const std::vector<float>& gradient, float learning_rate, int batch_size) {
-    
     if (d_conv_gradients == nullptr) {
         CUDA_CHECK(cudaMalloc(&d_conv_gradients, gradient.size() * sizeof(float)));
-        
-    
         CUDA_CHECK(cudaMalloc(&d_filter_gradients, cnn_filter.size() * sizeof(float)));
     }
 
     CUDA_CHECK(cudaMemcpy(d_input, last_input.data(), last_input.size() * sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_conv_gradients, gradient.data(), gradient.size() * sizeof(float), cudaMemcpyHostToDevice));
 
-    dim3 threadsPerBlock(filter_size, filter_size, 1);
-    
-    
-    dim3 blocksPerGrid(1, 1, num_of_filters); 
 
-    
-    convolution_filter_gradient_kernel <<<blocksPerGrid, threadsPerBlock >>> (
+    dim3 threadsPerBlockF(filter_size, filter_size, 1);
+    dim3 blocksPerGridF(1, 1, num_of_filters * in_channels); 
+
+    convolution_filter_gradient_kernel <<<blocksPerGridF, threadsPerBlockF >>> (
         d_input, d_conv_gradients, d_filter_gradients,
-        input_size, filter_size, output_size, num_of_filters, batch_size
+        input_size, filter_size, output_size, in_channels, num_of_filters, batch_size
     );
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    
     std::vector<float> h_filter_gradients(cnn_filter.size());
     CUDA_CHECK(cudaMemcpy(h_filter_gradients.data(), d_filter_gradients, h_filter_gradients.size() * sizeof(float), cudaMemcpyDeviceToHost));
 
-    
     for (size_t i = 0; i < cnn_filter.size(); i++) {
         cnn_filter[i] = cnn_filter[i] - (learning_rate * h_filter_gradients[i]);
     }
 
-    return std::vector<float>();
-}
 
+    std::vector<float> input_gradients_host(batch_size * in_channels * input_size * input_size);
+    float* d_input_gradients;
+    CUDA_CHECK(cudaMalloc(&d_input_gradients, input_gradients_host.size() * sizeof(float)));
+
+    dim3 threadsPerBlockI(16, 16, 1);
+    dim3 blocksPerGridI(
+        (input_size + threadsPerBlockI.x - 1) / threadsPerBlockI.x,
+        (input_size + threadsPerBlockI.y - 1) / threadsPerBlockI.y,
+        (batch_size * in_channels + threadsPerBlockI.z - 1) / threadsPerBlockI.z
+    );
+
+    convolution_input_gradient_kernel <<<blocksPerGridI, threadsPerBlockI >>> (
+        d_conv_gradients, d_filter, d_input_gradients,
+        input_size, filter_size, output_size, in_channels, num_of_filters, batch_size
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaMemcpy(input_gradients_host.data(), d_input_gradients, input_gradients_host.size() * sizeof(float), cudaMemcpyDeviceToHost));
+    cudaFree(d_input_gradients);
+
+
+    return input_gradients_host;
+}
 
 MaxPoolLayer::MaxPoolLayer(int input_size, int pool_size, int channels) {
     this->input_size = input_size;
@@ -487,6 +527,11 @@ MaxPoolLayer::~MaxPoolLayer() {
     if (d_conv_gradients) cudaFree(d_conv_gradients);
 }
 
+
+/// @brief 
+/// @param input 
+/// @param batch_size 
+/// @return 
 std::vector<float> MaxPoolLayer::forward(const std::vector<float>& input, int batch_size) {
     this->last_input = input;
     
@@ -522,37 +567,17 @@ std::vector<float> MaxPoolLayer::forward(const std::vector<float>& input, int ba
     std::vector<float> pooled_images(total_matrices * single_map_size);
     CUDA_CHECK(cudaMemcpy(pooled_images.data(), d_pool_output, pooled_images.size() * sizeof(float), cudaMemcpyDeviceToHost));
 
-    
-    std::vector<float> mlp_inputs(batch_size * flattened_size);
-    for (int p = 0; p < flattened_size; ++p) {
-        for (int b = 0; b < batch_size; ++b) {
-            int c = p / single_map_size;
-            int pixel_in_map = p % single_map_size;
-            int matrix_idx = (b * channels) + c;
-            
-            mlp_inputs[p * batch_size + b] = pooled_images[matrix_idx * single_map_size + pixel_in_map];
-        }
-    }
-    return mlp_inputs;
+
+    return pooled_images;
 }
 
 std::vector<float> MaxPoolLayer::backward(const std::vector<float>& gradient, float learning_rate, int batch_size) {
     int total_matrices = batch_size * channels;
     int single_map_size = output_size * output_size;
-    int flattened_size = channels * single_map_size;
+    
+    std::vector<float> pool_gradients = gradient;
 
     
-    std::vector<float> pool_gradients(total_matrices * single_map_size);
-    for (int p = 0; p < flattened_size; ++p) {
-        for (int b = 0; b < batch_size; ++b) {
-            int c = p / single_map_size;
-            int pixel_in_map = p % single_map_size;
-            int matrix_idx = (b * channels) + c;
-            
-            pool_gradients[matrix_idx * single_map_size + pixel_in_map] = gradient[p * batch_size + b];
-        }
-    }
-
     if (d_pool_gradients == nullptr) {
         CUDA_CHECK(cudaMalloc(&d_pool_gradients, pool_gradients.size() * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_conv_gradients, total_matrices * input_size * input_size * sizeof(float)));
@@ -579,6 +604,51 @@ std::vector<float> MaxPoolLayer::backward(const std::vector<float>& gradient, fl
     CUDA_CHECK(cudaMemcpy(conv_gradients.data(), d_conv_gradients, conv_gradients.size() * sizeof(float), cudaMemcpyDeviceToHost));
 
     return conv_gradients;
+}
+
+
+FlattenLayer::FlattenLayer(int channels, int input_size){
+    this->channels = channels;
+    this->input_size= input_size;
+    this->flattened_size = channels * input_size * input_size;
+}
+
+//map to linear for mlp
+std::vector<float> FlattenLayer::forward(const std::vector<float>& input, int batch_size){
+    int map_Size = input_size * input_size;
+    std::vector<float> mlp_inputs(batch_size * flattened_size);
+
+    for (int i = 0; i < flattened_size; i++)
+    {
+        for (int j = 0; j < batch_size; j++)
+        {
+            int c = i / map_Size;
+            int pixel_in_map = i % map_Size;
+            int matrixIdx = (j * channels) + c;
+
+            mlp_inputs[i * batch_size + j] = input[matrixIdx * map_Size + pixel_in_map];
+        }   
+    }
+    return mlp_inputs;
+}
+
+//linear to map for backpropagation
+std::vector<float> FlattenLayer::backward(const std::vector<float>& gradient, float learning_rate, int batch_size) {
+    int single_map_size = input_size * input_size;
+    std::vector<float> pool_gradients(batch_size * flattened_size);
+    
+    for (int p = 0; p < flattened_size; ++p) 
+    {
+        for (int b = 0; b < batch_size; ++b) 
+        {
+            int c = p / single_map_size;
+            int pixel_in_map = p % single_map_size;
+            int matrix_idx = (b * channels) + c;
+            
+            pool_gradients[matrix_idx * single_map_size + pixel_in_map] = gradient[p * batch_size + b];
+        }
+    }
+    return pool_gradients;
 }
 
 

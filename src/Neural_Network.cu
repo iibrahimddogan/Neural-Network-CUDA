@@ -64,15 +64,15 @@ __global__ void max_pooling_backward_kernel(const float* input_images, const flo
 
 
 __global__ void softmax_cross_entropy_kernel_opt(const float* logits, const float* targets, float* grads, float* losses, int num_classes, int batch_size) {
-    int b = blockIdx.x; // sample index
+    int b = blockIdx.x; 
     if (b >= batch_size) return;
 
-    extern __shared__ float sdata[]; // reused for reductions
+    extern __shared__ float sdata[]; 
 
     int tid = threadIdx.x;
     int nthreads = blockDim.x;
 
-    // 1) per-thread local max
+    
     float local_max = -INFINITY;
     for (int c = tid; c < num_classes; c += nthreads) {
         float v = logits[c * batch_size + b];
@@ -81,7 +81,7 @@ __global__ void softmax_cross_entropy_kernel_opt(const float* logits, const floa
     sdata[tid] = local_max;
     __syncthreads();
 
-    // 2) reduce to get global max
+    
     for (int offset = nthreads >> 1; offset > 0; offset >>= 1) {
         if (tid < offset) {
             sdata[tid] = fmaxf(sdata[tid], sdata[tid + offset]);
@@ -90,7 +90,7 @@ __global__ void softmax_cross_entropy_kernel_opt(const float* logits, const floa
     }
     float m = sdata[0];
 
-    // 3) compute partial sums of exp()
+    
     float local_sum = 0.0f;
     for (int c = tid; c < num_classes; c += nthreads) {
         float v = expf(logits[c * batch_size + b] - m);
@@ -99,7 +99,7 @@ __global__ void softmax_cross_entropy_kernel_opt(const float* logits, const floa
     sdata[tid] = local_sum;
     __syncthreads();
 
-    // 4) reduce sums
+    
     for (int offset = nthreads >> 1; offset > 0; offset >>= 1) {
         if (tid < offset) {
             sdata[tid] += sdata[tid + offset];
@@ -108,7 +108,7 @@ __global__ void softmax_cross_entropy_kernel_opt(const float* logits, const floa
     }
     float sum = sdata[0];
 
-    // 5) compute grads and per-sample loss (each thread handles subset)
+    
     float local_loss = 0.0f;
     for (int c = tid; c < num_classes; c += nthreads) {
         float prob = expf(logits[c * batch_size + b] - m) / sum;
@@ -118,7 +118,7 @@ __global__ void softmax_cross_entropy_kernel_opt(const float* logits, const floa
         }
     }
 
-    // reduce losses (only one thread will have non-zero local_loss)
+    
     sdata[tid] = local_loss;
     __syncthreads();
     for (int offset = nthreads >> 1; offset > 0; offset >>= 1) {
@@ -508,6 +508,11 @@ std::vector<float> Conv2DLayer::backward(const std::vector<float>& gradient, flo
     return input_gradients_host;
 }
 
+
+/// @brief 
+/// @param input_size 
+/// @param pool_size 
+/// @param channels 
 MaxPoolLayer::MaxPoolLayer(int input_size, int pool_size, int channels) {
     this->input_size = input_size;
     this->pool_size = pool_size;
@@ -538,7 +543,6 @@ std::vector<float> MaxPoolLayer::forward(const std::vector<float>& input, int ba
     
     int total_matrices = batch_size * channels; 
     int single_map_size = output_size * output_size; 
-    int flattened_size = channels * single_map_size; 
 
     if (d_input == nullptr || current_batch_size != batch_size) {
         if (d_input != nullptr) {
@@ -571,9 +575,15 @@ std::vector<float> MaxPoolLayer::forward(const std::vector<float>& input, int ba
     return pooled_images;
 }
 
+
+
+/// @brief 
+/// @param gradient 
+/// @param learning_rate 
+/// @param batch_size 
+/// @return 
 std::vector<float> MaxPoolLayer::backward(const std::vector<float>& gradient, float learning_rate, int batch_size) {
     int total_matrices = batch_size * channels;
-    int single_map_size = output_size * output_size;
     
     std::vector<float> pool_gradients = gradient;
 
@@ -586,6 +596,8 @@ std::vector<float> MaxPoolLayer::backward(const std::vector<float>& gradient, fl
     CUDA_CHECK(cudaMemcpy(d_input, last_input.data(), last_input.size() * sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_pool_gradients, pool_gradients.data(), pool_gradients.size() * sizeof(float), cudaMemcpyHostToDevice));
 
+    CUDA_CHECK(cudaMemset(d_conv_gradients, 0, total_matrices * input_size * input_size * sizeof(float)));
+    
     dim3 threadsPerBlock(16, 16, 1);
     dim3 blocksPerGrid(
         (output_size + threadsPerBlock.x - 1) / threadsPerBlock.x,
@@ -606,14 +618,19 @@ std::vector<float> MaxPoolLayer::backward(const std::vector<float>& gradient, fl
     return conv_gradients;
 }
 
-
+/// @brief 
+/// @param channels 
+/// @param input_size 
 FlattenLayer::FlattenLayer(int channels, int input_size){
     this->channels = channels;
     this->input_size= input_size;
     this->flattened_size = channels * input_size * input_size;
 }
 
-//map to linear for mlp
+/// @brief map to linear for mlp
+/// @param input 
+/// @param batch_size 
+/// @return 
 std::vector<float> FlattenLayer::forward(const std::vector<float>& input, int batch_size){
     int map_Size = input_size * input_size;
     std::vector<float> mlp_inputs(batch_size * flattened_size);
@@ -632,7 +649,11 @@ std::vector<float> FlattenLayer::forward(const std::vector<float>& input, int ba
     return mlp_inputs;
 }
 
-//linear to map for backpropagation
+/// @brief linear to map for backpropagation
+/// @param gradient 
+/// @param learning_rate 
+/// @param batch_size 
+/// @return 
 std::vector<float> FlattenLayer::backward(const std::vector<float>& gradient, float learning_rate, int batch_size) {
     int single_map_size = input_size * input_size;
     std::vector<float> pool_gradients(batch_size * flattened_size);
@@ -651,7 +672,10 @@ std::vector<float> FlattenLayer::backward(const std::vector<float>& gradient, fl
     return pool_gradients;
 }
 
-
+/// @brief 
+/// @param in_features 
+/// @param out_features 
+/// @param act_type 
 LinearLayer::LinearLayer(int in_features, int out_features, const std::string& act_type)
     :
     weights(out_features, in_features),
@@ -684,6 +708,11 @@ LinearLayer::LinearLayer(int in_features, int out_features, const std::string& a
     activations_T.allocate_device_memory();
 }
 
+
+/// @brief 
+/// @param input 
+/// @param batch_size 
+/// @return 
 std::vector<float> LinearLayer::forward(const std::vector<float>& input, int batch_size) {
     last_input = input;
 
@@ -719,6 +748,12 @@ std::vector<float> LinearLayer::forward(const std::vector<float>& input, int bat
     return activation.data;
 }
 
+
+/// @brief 
+/// @param gradient 
+/// @param learning_rate 
+/// @param batch_size 
+/// @return 
 std::vector<float> LinearLayer::backward(const std::vector<float>& gradient, float learning_rate, int batch_size) {
     if (error_mat.cols != batch_size) {
         error_mat = Neural_Matrix(weights.rows, batch_size);
@@ -775,6 +810,8 @@ std::vector<float> LinearLayer::backward(const std::vector<float>& gradient, flo
 
 static std::vector<float> s_last_prediction;
 
+/// @brief 
+/// @param batch_size 
 Neural_Network::Neural_Network(int batch_size) {
     this->batch_size = batch_size;
 }
@@ -785,10 +822,16 @@ Neural_Network::~Neural_Network() {
     }
 }
 
+
+/// @brief 
+/// @param layer 
 void Neural_Network::add_layer(ILayer* layer) {
     layers.push_back(layer);
 }
 
+/// @brief 
+/// @param input 
+/// @return 
 std::vector<float> Neural_Network::forward(const std::vector<float>& input) {
     std::vector<float> current_data = input;
     for (auto layer : layers) {
@@ -798,6 +841,10 @@ std::vector<float> Neural_Network::forward(const std::vector<float>& input) {
     return current_data;
 }
 
+
+/// @brief 
+/// @param target 
+/// @param learning_rate 
 void Neural_Network::backward(const std::vector<float>& target, float learning_rate) {
 
     // Use CUDA kernel to compute softmax + cross-entropy gradients on device.
@@ -844,6 +891,11 @@ void Neural_Network::backward(const std::vector<float>& target, float learning_r
     }
 }
 
+
+/// @brief 
+/// @param predicted 
+/// @param target 
+/// @return 
 float Neural_Network::calculate_mse(const std::vector<float>& predicted, const std::vector<float>& target) {
     float differance = 0.0f;
     for (size_t i = 0; i < predicted.size(); i++) {
@@ -853,6 +905,9 @@ float Neural_Network::calculate_mse(const std::vector<float>& predicted, const s
     return differance / static_cast<float>(predicted.size());
 }
 
+
+/// @brief 
+/// @param filename 
 void Neural_Network::save_model(const std::string& filename) const {
     std::ofstream out(filename, std::ios::out | std::ios::binary);
     
@@ -878,6 +933,9 @@ void Neural_Network::save_model(const std::string& filename) const {
     out.close();
 }
 
+
+/// @brief 
+/// @param filename 
 void Neural_Network::load_model(const std::string& filename) {
     std::ifstream in(filename, std::ios::in | std::ios::binary);
     

@@ -122,7 +122,7 @@ int main(int argc, char** argv) {
         std::string mode(argv[1]);
         if (mode == "test") run_test = true;
     }
-    std::cout << "Reading MNIST dataset..." << std::endl;
+    std::cout << "Reading dataset from data/..." << std::endl;
     std::vector<std::vector<float>> inputs;
     std::vector<std::vector<float>> targets;
 

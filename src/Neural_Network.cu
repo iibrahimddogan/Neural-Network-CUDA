@@ -269,6 +269,13 @@ __global__ void relu_derivative_kernel(float* gradients, const float* pre_activa
     }
 }
 
+__global__ void conv_relu_mask_kernel(float* gradients, const float* output, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size && output[idx] <= 0.0f) {
+        gradients[idx] = 0.0f;
+    }
+}
+
 __global__ void sigmoid_kernel(float* data, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -464,6 +471,15 @@ std::vector<float> Conv2DLayer::backward(const std::vector<float>& gradient, flo
     CUDA_CHECK(cudaMemcpy(d_input, last_input.data(), last_input.size() * sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_conv_gradients, gradient.data(), gradient.size() * sizeof(float), cudaMemcpyHostToDevice));
 
+
+    {
+        int total = (int)gradient.size();
+        int t = 256;
+        int b = (total + t - 1) / t;
+        conv_relu_mask_kernel<<<b, t>>>(d_conv_gradients, d_conv_output, total);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
 
     dim3 threadsPerBlockF(filter_size, filter_size, 1);
     dim3 blocksPerGridF(1, 1, num_of_filters * in_channels); 
@@ -721,7 +737,7 @@ std::vector<float> LinearLayer::forward(const std::vector<float>& input, int bat
     input_activation.allocate_device_memory();
     input_activation.copy_to_device();
 
-    if (output.cols != batch_size) {
+    if (output.rows != weights.rows || output.cols != batch_size) {
         output = Neural_Matrix(weights.rows, batch_size);
         output.allocate_device_memory();
         activation = Neural_Matrix(weights.rows, batch_size);
@@ -755,9 +771,13 @@ std::vector<float> LinearLayer::forward(const std::vector<float>& input, int bat
 /// @param batch_size 
 /// @return 
 std::vector<float> LinearLayer::backward(const std::vector<float>& gradient, float learning_rate, int batch_size) {
-    if (error_mat.cols != batch_size) {
+    if (error_mat.rows != weights.rows || error_mat.cols != batch_size) {
         error_mat = Neural_Matrix(weights.rows, batch_size);
         error_mat.allocate_device_memory();
+        activations_T = Neural_Matrix(batch_size, weights.cols);
+        activations_T.allocate_device_memory();
+    }
+    if (activations_T.rows != batch_size || activations_T.cols != weights.cols) {
         activations_T = Neural_Matrix(batch_size, weights.cols);
         activations_T.allocate_device_memory();
     }

@@ -15,31 +15,30 @@ Conv2D(1→16, 3×3) → MaxPool(2×2)
 
 | Dataset | Epochs | Batch | Test accuracy |
 |---|---|---|---|
+| MNIST (`data/number_data/`) | 20 | 128 | **98.72%** |
 | Fashion-MNIST (`data/`) | 20 | 128 | **88.55%** |
 
-This is up from 81.53% after fixing two backward-pass bugs: the missing ReLU derivative in `Conv2DLayer::backward`, and a batch=1 shape bug in `LinearLayer::backward`.
+Training: 20 epochs, batch size 128, learning rate 0.05.
 
-The default loader reads `data/`, which contains Fashion-MNIST in this repository. MNIST digits are in `data/number_data/`; a `--dataset` flag is not implemented yet.
+The default loader reads `data/`, which contains Fashion-MNIST in this repository. MNIST digits are in `data/number_data/`; the MNIST result above was produced by using those files as `data/`.
 
 ## Design notes
 
 - 19 custom CUDA kernels for conv, pooling, matmul, ReLU/Sigmoid, softmax/cross-entropy, and gradients.
 - Softmax/cross-entropy uses a shared-memory reduction.
 - Matmul and convolution are naive baselines; tiled versions are next.
-- Known gaps: no conv bias, uniform weight init, no shuffle, and per-layer host↔device copies.
 
 ## Build
 
 ```bash
-mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . -j
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release -j
 ```
 
 If your host compiler is newer than the CUDA toolkit supports:
 
 ```bash
-cmake .. -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler"
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler"
 ```
 
 ## Run
@@ -47,8 +46,13 @@ cmake .. -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler"
 From the repository root:
 
 ```bash
+# Linux/macOS (single-config generators)
 ./build/prog        # train 20 epochs and save data/mnist_cnn_oop_model.bin
 ./build/prog test   # evaluate on the 10k test images
+
+# Windows / Visual Studio (multi-config generators)
+.\build\Release\prog.exe
+.\build\Release\prog.exe test
 ```
 
 ## Roadmap

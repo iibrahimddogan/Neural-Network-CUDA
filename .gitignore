@@ -1,3 +1,13 @@
 build/
 build-win/
 .cache/
+
+# Visual Studio
+.vs/
+out/
+
+# nvcc ile elle derleme ciktilari
+prog.exe
+*.exp
+*.lib
+*.pdb

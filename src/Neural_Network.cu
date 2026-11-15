@@ -709,7 +709,7 @@ std::vector<float> MaxPoolLayer::forward(const std::vector<float>& input, int ba
     );
 
     
-    max_pooling_kernel << <blocksPerGrid, threadsPerBlock >> > (d_input, d_pool_output, input_size, pool_size, output_size, total_matrices);
+    max_pooling_kernel<<<blocksPerGrid, threadsPerBlock >>>(d_input, d_pool_output, input_size, pool_size, output_size, total_matrices);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -745,7 +745,7 @@ std::vector<float> MaxPoolLayer::backward(const std::vector<float>& gradient, fl
         (total_matrices + threadsPerBlock.z - 1) / threadsPerBlock.z
     );
 
-    max_pooling_backward_kernel << <blocksPerGrid, threadsPerBlock >> > (
+    max_pooling_backward_kernel<<<blocksPerGrid, threadsPerBlock >>>(
         d_input, d_pool_gradients, d_conv_gradients,
         input_size, pool_size, output_size, total_matrices 
         );
@@ -909,7 +909,7 @@ std::vector<float> LinearLayer::backward(const std::vector<float>& gradient, flo
     bias_deltas.allocate_device_memory();
     int threads = 256;
     int blocks = (biases.rows + threads - 1) / threads;
-    sum_bias_gradients_kernel << <blocks, threads >> > (
+    sum_bias_gradients_kernel<<<blocks, threads >>>(
         error_mat.device_data, bias_deltas.device_data, biases.rows, batch_size
         );
     CUDA_CHECK(cudaGetLastError());

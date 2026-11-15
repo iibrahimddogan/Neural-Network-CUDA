@@ -6,6 +6,14 @@
 #include <string>
 #include <stdexcept>
 
+/// @brief Loads a 28x28, 24-bit BMP drawing and converts it to MNIST-style input.
+///
+/// Pixels are averaged to grayscale and inverted (white background -> 0, black ink -> 1),
+/// so a black-on-white drawing looks like an MNIST digit. BMP rows are stored bottom-up.
+/// Not used by main() at the moment.
+/// @param filepath Path to the .bmp file (e.g. "data/number_data/3test.bmp").
+/// @return 784 floats in [0, 1], row-major 28x28.
+/// @throws std::runtime_error if the file cannot be opened.
 std::vector<float> load_custom_bmp(const std::string& filepath) {
     std::ifstream f(filepath, std::ios::binary);
     if (!f) throw std::runtime_error("test.bmp file not found!");
@@ -29,6 +37,11 @@ std::vector<float> load_custom_bmp(const std::string& filepath) {
 }
 
 
+/// @brief Reverses the byte order of a 32-bit integer (big-endian <-> little-endian).
+///
+/// MNIST/IDX headers are big-endian; x86 CPUs read little-endian.
+/// @param i Value as read from the file.
+/// @return Value with its 4 bytes reversed.
 int reverseInt(int i) {
     unsigned char c1, c2, c3, c4;
     c1 = i & 255;
@@ -39,6 +52,15 @@ int reverseInt(int i) {
 }
 
 
+/// @brief Reads an MNIST / Fashion-MNIST IDX image file and its label file.
+///
+/// Pixels are scaled to [0, 1]; labels are converted to one-hot vectors of length 10.
+/// Results are appended to `images` and `labels`.
+/// @param image_path Path to the *-images.idx3-ubyte file.
+/// @param label_path Path to the matching *-labels.idx1-ubyte file.
+/// @param images Output: one vector of n_rows * n_cols floats per image.
+/// @param labels Output: one one-hot vector of 10 floats per image.
+/// @throws std::runtime_error if either file cannot be opened.
 void read_mnist(const std::string& image_path, const std::string& label_path,
                 std::vector<std::vector<float>>& images, std::vector<std::vector<float>>& labels) {
 
@@ -86,7 +108,11 @@ void read_mnist(const std::string& image_path, const std::string& label_path,
     }
 }
 
-// Training main: train the network and save the model
+/// @brief Average softmax + cross-entropy loss of a batch, computed on the CPU (for logging only).
+/// @param logits Network outputs, [num_classes][batch] (index = class * batch_size + sample).
+/// @param targets One-hot labels, same layout.
+/// @param batch_size Number of samples.
+/// @return Mean of -log(softmax(logits)[true class]) over the batch.
 static float compute_batch_cross_entropy_loss(const std::vector<float>& logits, const std::vector<float>& targets, int batch_size) {
     int total = (int)logits.size();
     int num_classes = total / batch_size;
@@ -116,6 +142,11 @@ static float compute_batch_cross_entropy_loss(const std::vector<float>& logits, 
     return loss / (float)batch_size;
 }
 
+/// @brief Entry point.
+///
+/// `prog`       : trains the CNN for 20 epochs on data/train-*.idx and saves data/mnist_cnn_oop_model.bin.
+/// `prog test`  : loads that model and reports accuracy on data/t10k-*.idx.
+/// Run from the repository root so the relative `data/` paths resolve.
 int main(int argc, char** argv) {
     bool run_test = false;
     if (argc > 1) {

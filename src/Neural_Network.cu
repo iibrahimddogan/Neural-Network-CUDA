@@ -12,6 +12,19 @@
 #include "device_launch_parameters.h"
 
 
+/// @brief Max-pooling backward: sends each output gradient to the input position that held the maximum.
+///
+/// Recomputes the max position of every pooling window from the saved input, writes the gradient
+/// there and 0 to the other positions of the window.
+/// Launch: 3D grid, x = output column, y = output row, z = feature map (one thread per output pixel).
+/// @param input_images Forward-pass input of the pooling layer, [maps][input_size][input_size].
+/// @param pool_gradients d(loss)/d(pool output), [maps][output_size][output_size].
+/// @param conv_gradients Output: d(loss)/d(pool input), [maps][input_size][input_size]. Zero it before launch
+///        (positions not covered by any window are not written).
+/// @param input_size Width/height of each input map.
+/// @param pool_size Window size and stride.
+/// @param output_size Width/height of each output map (input_size / pool_size).
+/// @param batch_size Number of feature maps to process = images * channels (NOT just the image count).
 __global__ void max_pooling_backward_kernel(const float* input_images, const float* pool_gradients, float* conv_gradients, int input_size, int pool_size, int output_size, int batch_size) {
 
     
@@ -63,6 +76,17 @@ __global__ void max_pooling_backward_kernel(const float* input_images, const flo
 }
 
 
+/// @brief Softmax + cross-entropy for one sample per block, using shared-memory reductions.
+///
+/// For sample b: p = softmax(logits), grads = p - target, loss = -log(p[true class]).
+/// Max and sum are found with a tree reduction in shared memory (numerically stable softmax).
+/// Launch: `<<<batch_size, threads, threads * sizeof(float)>>>`; threads must be a power of two.
+/// @param logits Network outputs, [num_classes][batch] (index = class * batch_size + sample).
+/// @param targets One-hot labels, same layout as logits.
+/// @param grads Output: d(loss)/d(logits) = softmax - target, same layout (not divided by batch_size).
+/// @param losses Output: per-sample loss, length batch_size.
+/// @param num_classes Number of classes (10 for MNIST).
+/// @param batch_size Number of samples (= number of blocks).
 __global__ void softmax_cross_entropy_kernel_opt(const float* logits, const float* targets, float* grads, float* losses, int num_classes, int batch_size) {
     int b = blockIdx.x; 
     if (b >= batch_size) return;
@@ -132,6 +156,19 @@ __global__ void softmax_cross_entropy_kernel_opt(const float* logits, const floa
 }
 
 
+/// @brief Forward 2D convolution (valid padding, stride 1, no bias) followed by ReLU.
+///
+/// out[b][f][row][col] = max(0, sum over c,i,j of in[b][c][row+i][col+j] * filter[f][c][i][j]).
+/// Launch: 3D grid, x = output column, y = output row, z = batch * num_of_filters (one thread per output pixel).
+/// @param input_images Input, [batch][in_channels][input_size][input_size].
+/// @param filter Weights, [num_of_filters][in_channels][filter_size][filter_size].
+/// @param output_images Output, [batch][num_of_filters][output_size][output_size].
+/// @param input_size Width/height of the input image.
+/// @param filter_size Width/height of the filter.
+/// @param output_size input_size - filter_size + 1.
+/// @param in_channels Number of input channels.
+/// @param num_of_filters Number of filters (output channels).
+/// @param batch_size Number of images.
 __global__ void convolution_kernel(const float* input_images, const float* filter, float* output_images, int input_size, int filter_size, int output_size, int in_channels, int num_of_filters, int batch_size) {
     int col = threadIdx.x + blockDim.x * blockIdx.x;
     int row = threadIdx.y + blockDim.y * blockIdx.y;
@@ -162,6 +199,20 @@ __global__ void convolution_kernel(const float* input_images, const float* filte
     }
 }
 
+/// @brief Computes d(loss)/d(filter) for the convolution, averaged over the batch.
+///
+/// grad[f][c][i][j] = (1 / batch_size) * sum over b,r,col of in[b][c][r+i][col+j] * out_grad[b][f][r][col].
+/// Launch: blockDim = (filter_size, filter_size, 1), gridDim.z = num_of_filters * in_channels
+/// (one thread per filter weight; each thread loops over the whole batch).
+/// @param input_images Forward-pass input, [batch][in_channels][input_size][input_size].
+/// @param conv_gradients d(loss)/d(conv output) after the ReLU mask, [batch][num_of_filters][conv_output_size][conv_output_size].
+/// @param filter_gradients Output, [num_of_filters][in_channels][filter_size][filter_size].
+/// @param input_size Width/height of the input image.
+/// @param filter_size Width/height of the filter.
+/// @param conv_output_size Width/height of the conv output (input_size - filter_size + 1).
+/// @param in_channels Number of input channels.
+/// @param num_of_filters Number of filters.
+/// @param batch_size Number of images (used for the average).
 __global__ void convolution_filter_gradient_kernel(const float* input_images, const float* conv_gradients, float* filter_gradients, int input_size, int filter_size, int conv_output_size, int in_channels, int num_of_filters, int batch_size) {
     int f_col = threadIdx.x + blockDim.x * blockIdx.x;
     int f_row = threadIdx.y + blockDim.y * blockIdx.y;
@@ -189,6 +240,19 @@ __global__ void convolution_filter_gradient_kernel(const float* input_images, co
     }
 }
 
+/// @brief Computes d(loss)/d(input) for the convolution (the gradient passed to the previous layer).
+///
+/// in_grad[b][c][y][x] = sum over f,i,j of out_grad[b][f][y-i][x-j] * filter[f][c][i][j] (out-of-range terms skipped).
+/// Launch: 3D grid, x = input column, y = input row, z = batch * in_channels (one thread per input pixel).
+/// @param conv_gradients d(loss)/d(conv output) after the ReLU mask, [batch][num_of_filters][output_size][output_size].
+/// @param filters Filter weights used in the forward pass, [num_of_filters][in_channels][filter_size][filter_size].
+/// @param input_gradients Output, [batch][in_channels][input_size][input_size].
+/// @param input_size Width/height of the input image.
+/// @param filter_size Width/height of the filter.
+/// @param output_size Width/height of the conv output.
+/// @param in_channels Number of input channels.
+/// @param num_of_filters Number of filters.
+/// @param batch_size Number of images.
 __global__ void convolution_input_gradient_kernel(const float* conv_gradients, const float* filters, float* input_gradients, int input_size, int filter_size, int output_size, int in_channels, int num_of_filters, int batch_size) {
     int in_col = threadIdx.x + blockDim.x * blockIdx.x;
     int in_row = threadIdx.y + blockDim.y * blockIdx.y;
@@ -221,6 +285,14 @@ __global__ void convolution_input_gradient_kernel(const float* conv_gradients, c
     }
 }
 
+/// @brief Adds a bias to every column: output[row][col] += bias[row].
+///
+/// Used by LinearLayer, where each column is one sample.
+/// Launch: 2D grid, x = column, y = row.
+/// @param output Matrix to modify in place, rows x cols, row-major.
+/// @param bias Bias vector, length rows.
+/// @param rows Number of rows (output features).
+/// @param cols Number of columns (batch size).
 __global__ void add_bias_broadcast_kernel(float* output, const float* bias, int rows, int cols) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -230,6 +302,13 @@ __global__ void add_bias_broadcast_kernel(float* output, const float* bias, int 
     }
 }
 
+/// @brief Bias gradient: sums each row of the gradient matrix over the batch.
+///
+/// bias_deltas[row] = sum over col of gradients[row][col]. One thread per row.
+/// @param gradients d(loss)/d(pre-activation), rows x cols, row-major.
+/// @param bias_deltas Output, length rows.
+/// @param rows Number of rows (output features).
+/// @param cols Number of columns (batch size).
 __global__ void sum_bias_gradients_kernel(const float* gradients, float* bias_deltas, int rows, int cols) {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row < rows) {
@@ -241,6 +320,16 @@ __global__ void sum_bias_gradients_kernel(const float* gradients, float* bias_de
     }
 }
 
+/// @brief Matrix-vector product plus bias: output = weights * input + bias (single sample).
+///
+/// Currently NOT used anywhere; LinearLayer uses matmul_kernel + add_bias_broadcast_kernel instead.
+/// One thread per output row.
+/// @param weights rows x cols, row-major.
+/// @param input Vector of length cols.
+/// @param bias Vector of length rows.
+/// @param output Output vector of length rows.
+/// @param rows Number of output features.
+/// @param cols Number of input features.
 __global__ void forward_kernel(float* weights, float* input, float* bias, float* output, int rows, int cols){
     int x = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -253,6 +342,9 @@ __global__ void forward_kernel(float* weights, float* input, float* bias, float*
     }
 }
 
+/// @brief In-place ReLU: data[i] = max(0, data[i]). One thread per element.
+/// @param data Array to modify.
+/// @param size Number of elements.
 __global__ void relu_kernel(float* data, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -261,6 +353,12 @@ __global__ void relu_kernel(float* data, int size) {
     }
 }
 
+/// @brief Applies the ReLU derivative to a gradient: gradients[i] = 0 where pre_activations[i] <= 0.
+///
+/// One thread per element.
+/// @param gradients Incoming gradient, modified in place.
+/// @param pre_activations Values before the ReLU (z), same size.
+/// @param size Number of elements.
 __global__ void relu_derivative_kernel(float* gradients, const float* pre_activations, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -269,6 +367,13 @@ __global__ void relu_derivative_kernel(float* gradients, const float* pre_activa
     }
 }
 
+/// @brief ReLU derivative for the convolution layer, using the post-ReLU output.
+///
+/// gradients[i] = 0 where output[i] <= 0. Works because the conv kernel applies ReLU itself,
+/// so output <= 0 means the ReLU was inactive. One thread per element.
+/// @param gradients Incoming gradient, modified in place.
+/// @param output Conv output after ReLU, same size.
+/// @param size Number of elements.
 __global__ void conv_relu_mask_kernel(float* gradients, const float* output, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size && output[idx] <= 0.0f) {
@@ -276,6 +381,9 @@ __global__ void conv_relu_mask_kernel(float* gradients, const float* output, int
     }
 }
 
+/// @brief In-place sigmoid: data[i] = 1 / (1 + e^-data[i]), input clamped to [-40, 40]. One thread per element.
+/// @param data Array to modify.
+/// @param size Number of elements.
 __global__ void sigmoid_kernel(float* data, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -285,6 +393,12 @@ __global__ void sigmoid_kernel(float* data, int size) {
     }
 }
 
+/// @brief Applies the sigmoid derivative to a gradient: gradients[i] *= s * (1 - s), s = sigmoid(pre_activations[i]).
+///
+/// One thread per element.
+/// @param gradients Incoming gradient, modified in place.
+/// @param pre_activations Values before the sigmoid (z), same size.
+/// @param size Number of elements.
 __global__ void sigmoid_derivative_kernel(float* gradients, const float* pre_activations, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -295,6 +409,10 @@ __global__ void sigmoid_derivative_kernel(float* gradients, const float* pre_act
     }
 }
 
+/// @brief In-place scale: data[i] *= scalar. One thread per element.
+/// @param data Array to modify.
+/// @param scalar Value to multiply by.
+/// @param size Number of elements.
 __global__ void multiply_scalar_kernel(float* data, float scalar, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -303,6 +421,10 @@ __global__ void multiply_scalar_kernel(float* data, float scalar, int size) {
     }
 }
 
+/// @brief In-place element-wise subtraction: data[i] -= other[i]. One thread per element.
+/// @param data Array to modify.
+/// @param other Array to subtract, same size.
+/// @param size Number of elements.
 __global__ void subtract_kernel(float* data, const float* other, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -311,6 +433,10 @@ __global__ void subtract_kernel(float* data, const float* other, int size) {
     }
 }
 
+/// @brief In-place element-wise addition: data[i] += other[i]. One thread per element.
+/// @param data Array to modify.
+/// @param other Array to add, same size.
+/// @param size Number of elements.
 __global__ void add_kernel(float* data, const float* other, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -319,6 +445,11 @@ __global__ void add_kernel(float* data, const float* other, int size) {
     }
 }
 
+/// @brief Matrix transpose: output (cols x rows) = input (rows x cols)^T. One thread per element.
+/// @param input Source matrix, rows x cols, row-major.
+/// @param output Destination matrix, cols x rows, row-major (must not overlap input).
+/// @param rows Number of rows of the input.
+/// @param cols Number of columns of the input.
 __global__ void transpose_kernel(const float* input, float* output, int rows, int cols) {
     int index = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -329,6 +460,16 @@ __global__ void transpose_kernel(const float* input, float* output, int rows, in
     }
 }
 
+/// @brief Naive matrix multiplication: C = A * B (no shared-memory tiling).
+///
+/// Each thread computes one element of C with a loop over A_cols.
+/// Launch: 2D grid, x = column of C, y = row of C.
+/// @param A_matrix A, A_rows x A_cols, row-major.
+/// @param B_matrix B, A_cols x B_cols, row-major.
+/// @param outputMatrix C, A_rows x B_cols, row-major.
+/// @param A_rows Rows of A (and C).
+/// @param A_cols Columns of A = rows of B.
+/// @param B_cols Columns of B (and C).
 __global__ void matmul_kernel(const float* A_matrix, const float* B_matrix, float* outputMatrix, int A_rows, int A_cols, int B_cols) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -344,6 +485,16 @@ __global__ void matmul_kernel(const float* A_matrix, const float* B_matrix, floa
 
 
 
+/// @brief Max-pooling forward: each output pixel is the maximum of a pool_size x pool_size window.
+///
+/// Windows do not overlap (stride = pool_size).
+/// Launch: 3D grid, x = output column, y = output row, z = feature map.
+/// @param input_images Input, [maps][input_size][input_size].
+/// @param output_images Output, [maps][output_size][output_size].
+/// @param input_size Width/height of each input map.
+/// @param pool_size Window size and stride.
+/// @param output_size input_size / pool_size (rounded down).
+/// @param batch_size Number of feature maps to process = images * channels (NOT just the image count).
 __global__ void max_pooling_kernel(const float* input_images, float* output_images, int input_size, int pool_size, int output_size, int batch_size) {
     int output_col = threadIdx.x + blockDim.x * blockIdx.x;
     int output_row = threadIdx.y + blockDim.y * blockIdx.y;
@@ -376,11 +527,6 @@ __global__ void max_pooling_kernel(const float* input_images, float* output_imag
 }
 
 
-/// @brief 
-/// @param in_channels 
-/// @param input_size 
-/// @param filter_size 
-/// @param num_of_filters 
 Conv2DLayer::Conv2DLayer(int in_channels, int input_size, int filter_size, int num_of_filters) {
     this->in_channels = in_channels;
     this->input_size = input_size;
@@ -416,10 +562,6 @@ Conv2DLayer::~Conv2DLayer() {
 }
 
 
-/// @brief 
-/// @param input 
-/// @param batch_size 
-/// @return 
 std::vector<float> Conv2DLayer::forward(const std::vector<float>& input, int batch_size) {
     this->last_input = input;
     int conv_output_size = this->output_size;
@@ -457,11 +599,6 @@ std::vector<float> Conv2DLayer::forward(const std::vector<float>& input, int bat
 }
 
 
-/// @brief 
-/// @param gradient 
-/// @param learning_rate 
-/// @param batch_size 
-/// @return 
 std::vector<float> Conv2DLayer::backward(const std::vector<float>& gradient, float learning_rate, int batch_size) {
     if (d_conv_gradients == nullptr) {
         CUDA_CHECK(cudaMalloc(&d_conv_gradients, gradient.size() * sizeof(float)));
@@ -525,10 +662,6 @@ std::vector<float> Conv2DLayer::backward(const std::vector<float>& gradient, flo
 }
 
 
-/// @brief 
-/// @param input_size 
-/// @param pool_size 
-/// @param channels 
 MaxPoolLayer::MaxPoolLayer(int input_size, int pool_size, int channels) {
     this->input_size = input_size;
     this->pool_size = pool_size;
@@ -549,10 +682,6 @@ MaxPoolLayer::~MaxPoolLayer() {
 }
 
 
-/// @brief 
-/// @param input 
-/// @param batch_size 
-/// @return 
 std::vector<float> MaxPoolLayer::forward(const std::vector<float>& input, int batch_size) {
     this->last_input = input;
     
@@ -580,7 +709,7 @@ std::vector<float> MaxPoolLayer::forward(const std::vector<float>& input, int ba
     );
 
     
-    max_pooling_kernel << <blocksPerGrid, threadsPerBlock >> > (d_input, d_pool_output, input_size, pool_size, output_size, total_matrices);
+    max_pooling_kernel<<<blocksPerGrid, threadsPerBlock >>>(d_input, d_pool_output, input_size, pool_size, output_size, total_matrices);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -593,11 +722,6 @@ std::vector<float> MaxPoolLayer::forward(const std::vector<float>& input, int ba
 
 
 
-/// @brief 
-/// @param gradient 
-/// @param learning_rate 
-/// @param batch_size 
-/// @return 
 std::vector<float> MaxPoolLayer::backward(const std::vector<float>& gradient, float learning_rate, int batch_size) {
     int total_matrices = batch_size * channels;
     
@@ -621,7 +745,7 @@ std::vector<float> MaxPoolLayer::backward(const std::vector<float>& gradient, fl
         (total_matrices + threadsPerBlock.z - 1) / threadsPerBlock.z
     );
 
-    max_pooling_backward_kernel << <blocksPerGrid, threadsPerBlock >> > (
+    max_pooling_backward_kernel<<<blocksPerGrid, threadsPerBlock >>>(
         d_input, d_pool_gradients, d_conv_gradients,
         input_size, pool_size, output_size, total_matrices 
         );
@@ -634,19 +758,12 @@ std::vector<float> MaxPoolLayer::backward(const std::vector<float>& gradient, fl
     return conv_gradients;
 }
 
-/// @brief 
-/// @param channels 
-/// @param input_size 
 FlattenLayer::FlattenLayer(int channels, int input_size){
     this->channels = channels;
     this->input_size= input_size;
     this->flattened_size = channels * input_size * input_size;
 }
 
-/// @brief map to linear for mlp
-/// @param input 
-/// @param batch_size 
-/// @return 
 std::vector<float> FlattenLayer::forward(const std::vector<float>& input, int batch_size){
     int map_Size = input_size * input_size;
     std::vector<float> mlp_inputs(batch_size * flattened_size);
@@ -665,11 +782,6 @@ std::vector<float> FlattenLayer::forward(const std::vector<float>& input, int ba
     return mlp_inputs;
 }
 
-/// @brief linear to map for backpropagation
-/// @param gradient 
-/// @param learning_rate 
-/// @param batch_size 
-/// @return 
 std::vector<float> FlattenLayer::backward(const std::vector<float>& gradient, float learning_rate, int batch_size) {
     int single_map_size = input_size * input_size;
     std::vector<float> pool_gradients(batch_size * flattened_size);
@@ -688,10 +800,6 @@ std::vector<float> FlattenLayer::backward(const std::vector<float>& gradient, fl
     return pool_gradients;
 }
 
-/// @brief 
-/// @param in_features 
-/// @param out_features 
-/// @param act_type 
 LinearLayer::LinearLayer(int in_features, int out_features, const std::string& act_type)
     :
     weights(out_features, in_features),
@@ -725,10 +833,6 @@ LinearLayer::LinearLayer(int in_features, int out_features, const std::string& a
 }
 
 
-/// @brief 
-/// @param input 
-/// @param batch_size 
-/// @return 
 std::vector<float> LinearLayer::forward(const std::vector<float>& input, int batch_size) {
     last_input = input;
 
@@ -765,11 +869,6 @@ std::vector<float> LinearLayer::forward(const std::vector<float>& input, int bat
 }
 
 
-/// @brief 
-/// @param gradient 
-/// @param learning_rate 
-/// @param batch_size 
-/// @return 
 std::vector<float> LinearLayer::backward(const std::vector<float>& gradient, float learning_rate, int batch_size) {
     if (error_mat.rows != weights.rows || error_mat.cols != batch_size) {
         error_mat = Neural_Matrix(weights.rows, batch_size);
@@ -810,7 +909,7 @@ std::vector<float> LinearLayer::backward(const std::vector<float>& gradient, flo
     bias_deltas.allocate_device_memory();
     int threads = 256;
     int blocks = (biases.rows + threads - 1) / threads;
-    sum_bias_gradients_kernel << <blocks, threads >> > (
+    sum_bias_gradients_kernel<<<blocks, threads >>>(
         error_mat.device_data, bias_deltas.device_data, biases.rows, batch_size
         );
     CUDA_CHECK(cudaGetLastError());
@@ -830,8 +929,6 @@ std::vector<float> LinearLayer::backward(const std::vector<float>& gradient, flo
 
 static std::vector<float> s_last_prediction;
 
-/// @brief 
-/// @param batch_size 
 Neural_Network::Neural_Network(int batch_size) {
     this->batch_size = batch_size;
 }
@@ -843,15 +940,10 @@ Neural_Network::~Neural_Network() {
 }
 
 
-/// @brief 
-/// @param layer 
 void Neural_Network::add_layer(ILayer* layer) {
     layers.push_back(layer);
 }
 
-/// @brief 
-/// @param input 
-/// @return 
 std::vector<float> Neural_Network::forward(const std::vector<float>& input) {
     std::vector<float> current_data = input;
     for (auto layer : layers) {
@@ -862,9 +954,6 @@ std::vector<float> Neural_Network::forward(const std::vector<float>& input) {
 }
 
 
-/// @brief 
-/// @param target 
-/// @param learning_rate 
 void Neural_Network::backward(const std::vector<float>& target, float learning_rate) {
 
     // Use CUDA kernel to compute softmax + cross-entropy gradients on device.
@@ -912,10 +1001,6 @@ void Neural_Network::backward(const std::vector<float>& target, float learning_r
 }
 
 
-/// @brief 
-/// @param predicted 
-/// @param target 
-/// @return 
 float Neural_Network::calculate_mse(const std::vector<float>& predicted, const std::vector<float>& target) {
     float differance = 0.0f;
     for (size_t i = 0; i < predicted.size(); i++) {
@@ -926,8 +1011,6 @@ float Neural_Network::calculate_mse(const std::vector<float>& predicted, const s
 }
 
 
-/// @brief 
-/// @param filename 
 void Neural_Network::save_model(const std::string& filename) const {
     std::ofstream out(filename, std::ios::out | std::ios::binary);
     
@@ -954,8 +1037,6 @@ void Neural_Network::save_model(const std::string& filename) const {
 }
 
 
-/// @brief 
-/// @param filename 
 void Neural_Network::load_model(const std::string& filename) {
     std::ifstream in(filename, std::ios::in | std::ios::binary);
     
@@ -998,11 +1079,6 @@ void Neural_Network::load_model(const std::string& filename) {
     in.close();
 }
 
-/// <summary>
-/// 
-/// </summary>
-/// <param name="r"></param>
-/// <param name="c"></param>
 Neural_Matrix::Neural_Matrix(int r, int c){
     rows = r;
     cols = c;
@@ -1017,10 +1093,6 @@ Neural_Matrix::~Neural_Matrix() {
     }
 }
 
-/// <summary>
-/// 
-/// </summary>
-/// <param name="other"></param>
 Neural_Matrix::Neural_Matrix(const Neural_Matrix& other){
     rows = other.rows;
     cols = other.cols;
@@ -1104,10 +1176,6 @@ void Neural_Matrix::apply_relu(){
     
 }
 
-/// <summary>
-/// 
-/// </summary>
-/// <param name="matrix"></param>
 void Neural_Matrix::relu_derivative(const Neural_Matrix& matrix){
 
     int size = rows * cols;
@@ -1139,10 +1207,6 @@ void Neural_Matrix::sigmoid_derivative(const Neural_Matrix& pre_activations) {
     
 }
 
-/// <summary>
-/// 
-/// </summary>
-/// <param name="scalar"></param>
 void Neural_Matrix::multiply_scalar(float scalar){
     int size = rows * cols;
     int threadsPerBlock = 256;
@@ -1153,10 +1217,6 @@ void Neural_Matrix::multiply_scalar(float scalar){
     
 }
 
-/// <summary>
-/// 
-/// </summary>
-/// <param name="other"></param>
 void Neural_Matrix::subtract(const Neural_Matrix& other){
     int size = rows * cols;
     int threadsPerBlock = 256;
@@ -1167,10 +1227,6 @@ void Neural_Matrix::subtract(const Neural_Matrix& other){
     
 }
 
-/// <summary>
-/// 
-/// </summary>
-/// <param name="other"></param>
 void Neural_Matrix::add(const Neural_Matrix& other){
     int size = rows * cols;
     int threadsPerBlock = 256;
@@ -1181,10 +1237,6 @@ void Neural_Matrix::add(const Neural_Matrix& other){
     
 }
 
-/// <summary>
-/// 
-/// </summary>
-/// <param name="result"></param>
 void Neural_Matrix::transpose(Neural_Matrix& result) const{
 
     int size = rows * cols;
@@ -1197,11 +1249,6 @@ void Neural_Matrix::transpose(Neural_Matrix& result) const{
     
 }
 
-/// <summary>
-/// 
-/// </summary>
-/// <param name="other"></param>
-/// <param name="result"></param>
 void Neural_Matrix::multiply(const Neural_Matrix& other, Neural_Matrix& result) const{
     if (this->cols != other.rows) { throw std::runtime_error("Matrix dimensions are incompatible."); }
 
